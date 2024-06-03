@@ -38,6 +38,9 @@
 #include <haproxy/global.h>
 #include <haproxy/hlua.h>
 #include <haproxy/http_ana.h>
+#if defined(USE_LINUX_CAP)
+#include <haproxy/linuxcap.h>
+#endif
 #include <haproxy/log.h>
 #include <haproxy/net_helper.h>
 #include <haproxy/sc_strm.h>
@@ -113,6 +116,12 @@ struct post_mortem {
 		pid_t pid;
 		uid_t boot_uid;
 		gid_t boot_gid;
+#if defined(USE_LINUX_CAP)
+		struct {
+			struct __user_cap_data_struct boot; // initial process capabilities
+			int err; // errno, if capget() syscall fails
+		} caps_info;
+#endif
 		struct rlimit limit_fd;  // RLIMIT_NOFILE
 		struct rlimit limit_ram; // RLIMIT_DATA
 		char **argv;
@@ -501,6 +510,10 @@ static int debug_parse_cli_show_libs(char **args, char *payload, struct appctx *
 static int debug_parse_cli_show_dev(char **args, char *payload, struct appctx *appctx, void *private)
 {
 	const char **build_opt;
+#if defined(USE_LINUX_CAP)
+	/* to dump runtime process capabilities */
+	struct __user_cap_data_struct runtime_caps = { };
+#endif
 
 	if (*args[2])
 		return cli_err(appctx, "This command takes no argument.\n");
@@ -558,6 +571,27 @@ static int debug_parse_cli_show_dev(char **args, char *payload, struct appctx *a
 	chunk_appendf(&trash, "  boot gid: %d\n", post_mortem.process.boot_gid);
 	chunk_appendf(&trash, "  runtime gid: %d\n", getegid());
 
+#if defined(USE_LINUX_CAP)
+	/* let's dump saved in feed_post_mortem() initial capabilities sets */
+	if(!post_mortem.process.caps_info.err) {
+		chunk_appendf(&trash, "  boot capabilities (32-bit):\n");
+		chunk_appendf(&trash, "  \tEffective: 0x%08x\n", post_mortem.process.caps_info.boot.effective);
+		chunk_appendf(&trash, "  \tPermitted: 0x%08x\n", post_mortem.process.caps_info.boot.permitted);
+		chunk_appendf(&trash, "  \tInheritable: 0x%08x\n", post_mortem.process.caps_info.boot.inheritable);
+	} else {
+		chunk_appendf(&trash, "  capget() failed with: %s.\n",
+			      strerror(post_mortem.process.caps_info.err));
+	}
+	/* let's print actual capabilities sets, could be useful in order to compare */
+	if (capget(&cap_hdr_haproxy, &runtime_caps) == 0) {
+		chunk_appendf(&trash, "  runtime capabilities (32-bit):\n");
+		chunk_appendf(&trash, "  \tEffective: 0x%08x\n", runtime_caps.effective);
+		chunk_appendf(&trash, "  \tPermitted: 0x%08x\n", runtime_caps.permitted);
+		chunk_appendf(&trash, "  \tInheritable: 0x%08x\n", runtime_caps.inheritable);
+	} else {
+		chunk_appendf(&trash, "  capget() failed with: %s.\n", strerror(errno));
+	}
+#endif
 	if ((ulong)post_mortem.process.limit_fd.rlim_cur != RLIM_INFINITY)
 		chunk_appendf(&trash, "  fd limit (soft): %lu\n", (ulong)post_mortem.process.limit_fd.rlim_cur);
 	if ((ulong)post_mortem.process.limit_fd.rlim_max != RLIM_INFINITY)
@@ -2284,6 +2318,15 @@ static int feed_post_mortem()
 	post_mortem.process.argc = global.argc;
 	post_mortem.process.argv = global.argv;
 
+#if defined(USE_LINUX_CAP)
+	post_mortem.process.caps_info.boot.effective = \
+	post_mortem.process.caps_info.boot.permitted = \
+	post_mortem.process.caps_info.boot.inheritable = \
+	post_mortem.process.caps_info.err = 0;
+	if (capget(&cap_hdr_haproxy, &post_mortem.process.caps_info.boot) == -1) {
+		post_mortem.process.caps_info.err = errno;
+	}
+#endif
 	getrlimit(RLIMIT_NOFILE, &post_mortem.process.limit_fd);
 	getrlimit(RLIMIT_DATA, &post_mortem.process.limit_ram);
 
