@@ -4671,3 +4671,32 @@ Example:
 	...
 	[ALERT]    (96797) : Binding [haproxy.cfg:36] for frontend fe: cannot bind socket (Permission denied) for [0.0.0.0:80]
 	[ALERT]    (96797) : [haproxy.main()] Some protocols failed to start their listeners! Exiting.
+
+It is worthy to note this kernel warning below in the dmesg log at the process
+start:
+
+	[1710243.523230] capability: warning: `haproxy' uses 32-bit capabilities (legacy support in use)
+
+It can be safely ignored. This warning does not mean that haproxy is built as a
+32-bit binary (by the way, it could be verified with 'file' utility). The
+warning simply means, that haproxy is just using 32-bit capabilities with
+version _LINUX_CAPABILITY_VERSION_1.
+
+_LINUX_CAPABILITY_VERSION_1 was choosen, because the Linux capabilities support
+was designed as someting simple and adhering to real users needs, i.e. only in
+order to be able to set capabilities necessary for some network features without
+running haproxy process as root. Linux capabilities support was also designed
+with the maximum plateform compatibility, because application may run on systems
+with Linux kernels older than 2.6.26 and in very restrictive RAM environments
+(some embedded platforms with 64M RAM).
+
+The highest supported capability is CAP_SYS_ADMIN, which is the 21-st bit in
+any capability set. Capabilities sets for _LINUX_CAPABILITY_VERSION_1 are
+implemented as 4-byte integers. 8-byte integers, which were introduced in
+_LINUX_CAPABILITY_VERSION_2 to support new system capabilities like
+CAP_CHECKPOINT_RESTORE(40), CAP_BPF(39), CAP_PERFMON(38), etc (see man page
+capabilities(7) for details) are not needed and are tiresome to parse.
+
+The same thing for the file capabilities, VFS_CAP_REVISION_1 was choosen, as we
+assume that administrator will set for haproxy binary only capabilities, that
+are supported in the 'caplist' keyword.
