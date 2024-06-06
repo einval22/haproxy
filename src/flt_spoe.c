@@ -249,7 +249,7 @@ static const char *spoe_appctx_state_str[SPOE_APPCTX_ST_END+1] = {
 static char *
 generate_pseudo_uuid()
 {
-	ha_generate_uuid(&trash);
+	ha_generate_uuid_v4(&trash);
 	return my_strndup(trash.area, trash.data);
 }
 
@@ -1131,7 +1131,6 @@ spoe_handle_healthcheck_response(char *frame, size_t size, char *err, int errlen
 static int
 spoe_send_frame(struct appctx *appctx, char *buf, size_t framesz)
 {
-	struct stconn *sc = appctx_sc(appctx);
 	int      ret;
 	uint32_t netint;
 
@@ -1140,15 +1139,8 @@ spoe_send_frame(struct appctx *appctx, char *buf, size_t framesz)
 	netint = htonl(framesz);
 	memcpy(buf, (char *)&netint, 4);
 	ret = applet_putblk(appctx, buf, framesz+4);
-	if (ret <= 0) {
-		if (ret == -3 && b_is_null(&sc_ic(sc)->buf)) {
-			/* WT: is this still needed for the case ret==-3 ? */
-			sc_need_room(sc, 0);
-			return 1; /* retry */
-		}
-		SPOE_APPCTX(appctx)->status_code = SPOE_FRM_ERR_IO;
-		return -1; /* error */
-	}
+	if (ret <= 0)
+		return 1; /* retry */
 	return framesz;
 }
 
@@ -1165,6 +1157,10 @@ spoe_recv_frame(struct appctx *appctx, char *buf, size_t framesz)
 	ret = co_getblk(sc_oc(sc), (char *)&netint, 4, 0);
 	if (ret > 0) {
 		framesz = ntohl(netint);
+		if (framesz < 7)  {
+			SPOE_APPCTX(appctx)->status_code = SPOE_FRM_ERR_INVALID;
+			return -1;
+		}
 		if (framesz > SPOE_APPCTX(appctx)->max_frame_size) {
 			SPOE_APPCTX(appctx)->status_code = SPOE_FRM_ERR_TOO_BIG;
 			return -1;
@@ -1930,7 +1926,7 @@ spoe_handle_appctx(struct appctx *appctx)
 	if (SPOE_APPCTX(appctx) == NULL)
 		return;
 
-	if (unlikely(se_fl_test(appctx->sedesc, (SE_FL_EOS|SE_FL_ERROR|SE_FL_SHR|SE_FL_SHW)))) {
+	if (unlikely(se_fl_test(appctx->sedesc, (SE_FL_EOS|SE_FL_ERROR)))) {
 		co_skip(sc_oc(sc), co_data(sc_oc(sc)));
 		goto out;
 	}
@@ -1998,10 +1994,13 @@ spoe_handle_appctx(struct appctx *appctx)
 			__fallthrough;
 
 		case SPOE_APPCTX_ST_END:
+			co_skip(sc_oc(sc), co_data(sc_oc(sc)));
 			return;
 	}
   out:
-	if (SPOE_APPCTX(appctx)->task->expire != TICK_ETERNITY)
+	if (stopping && appctx->st0 == SPOE_APPCTX_ST_IDLE)
+		task_wakeup(SPOE_APPCTX(appctx)->task, TASK_WOKEN_MSG);
+	else if (SPOE_APPCTX(appctx)->task->expire != TICK_ETERNITY)
 		task_queue(SPOE_APPCTX(appctx)->task);
 }
 
@@ -2625,6 +2624,8 @@ spoe_stop_processing(struct spoe_agent *agent, struct spoe_context *ctx)
 
 	/* Reset processing timer */
 	ctx->process_exp = TICK_ETERNITY;
+	ctx->strm->req.analyse_exp = TICK_ETERNITY;
+	ctx->strm->res.analyse_exp = TICK_ETERNITY;
 
 	spoe_release_buffer(&ctx->buffer, &ctx->buffer_wait);
 
@@ -2683,8 +2684,10 @@ spoe_process_messages(struct stream *s, struct spoe_context *ctx,
 
 		if (!tick_isset(ctx->process_exp)) {
 			ctx->process_exp = tick_add_ifset(now_ms, agent->timeout.processing);
-			s->task->expire  = tick_first((tick_is_expired(s->task->expire, now_ms) ? 0 : s->task->expire),
-						      ctx->process_exp);
+			if (dir == SMP_OPT_DIR_REQ)
+				s->req.analyse_exp = ctx->process_exp;
+			else
+				s->res.analyse_exp = ctx->process_exp;
 		}
 		ret = spoe_start_processing(agent, ctx, dir);
 		if (!ret)
@@ -2849,21 +2852,19 @@ spoe_acquire_buffer(struct buffer *buf, struct buffer_wait *buffer_wait)
 	if (buf->size)
 		return 1;
 
-	if (LIST_INLIST(&buffer_wait->list))
-		LIST_DEL_INIT(&buffer_wait->list);
+	b_dequeue(buffer_wait);
 
-	if (b_alloc(buf))
+	if (b_alloc(buf, DB_CHANNEL))
 		return 1;
 
-	LIST_APPEND(&th_ctx->buffer_wq, &buffer_wait->list);
+	b_requeue(DB_CHANNEL, buffer_wait);
 	return 0;
 }
 
 static void
 spoe_release_buffer(struct buffer *buf, struct buffer_wait *buffer_wait)
 {
-	if (LIST_INLIST(&buffer_wait->list))
-		LIST_DEL_INIT(&buffer_wait->list);
+	b_dequeue(buffer_wait);
 
 	/* Release the buffer if needed */
 	if (buf->size) {
@@ -3011,7 +3012,7 @@ spoe_init(struct proxy *px, struct flt_conf *fconf)
 
 	/* conf->agent_fe was already initialized during the config
 	 * parsing. Finish initialization. */
-        conf->agent_fe.last_change = ns_to_sec(now_ns);
+        conf->agent_fe.fe_counters.last_change = ns_to_sec(now_ns);
         conf->agent_fe.cap = PR_CAP_FE;
         conf->agent_fe.mode = PR_MODE_TCP;
         conf->agent_fe.maxconn = 0;

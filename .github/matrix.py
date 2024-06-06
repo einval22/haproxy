@@ -86,14 +86,6 @@ def clean_compression(compression):
     return compression.replace("USE_", "").lower()
 
 
-def get_asan_flags(cc):
-    return [
-        "USE_OBSOLETE_LINKER=1",
-        'DEBUG_CFLAGS="-g -fsanitize=address"',
-        'LDFLAGS="-fsanitize=address"',
-        'CPU_CFLAGS.generic="-O1"',
-    ]
-
 def main(ref_name):
     print("Generating matrix for branch '{}'.".format(ref_name))
 
@@ -125,13 +117,14 @@ def main(ref_name):
                 "TARGET": TARGET,
                 "CC": CC,
                 "FLAGS": [
+                    'DEBUG="-DDEBUG_LIST"',
                     "USE_ZLIB=1",
                     "USE_OT=1",
                     "OT_INC=${HOME}/opt-ot/include",
                     "OT_LIB=${HOME}/opt-ot/lib",
                     "OT_RUNPATH=1",
-                    "USE_PCRE=1",
-                    "USE_PCRE_JIT=1",
+                    "USE_PCRE2=1",
+                    "USE_PCRE2_JIT=1",
                     "USE_LUA=1",
                     "USE_OPENSSL=1",
                     "USE_SYSTEMD=1",
@@ -155,15 +148,17 @@ def main(ref_name):
                 "os": os,
                 "TARGET": TARGET,
                 "CC": CC,
-                "FLAGS": get_asan_flags(CC)
-                + [
+                "FLAGS": [
+                    "USE_OBSOLETE_LINKER=1",
+                    'ARCH_FLAGS="-g -fsanitize=address"',
+                    'OPT_CFLAGS="-O1"',
                     "USE_ZLIB=1",
                     "USE_OT=1",
                     "OT_INC=${HOME}/opt-ot/include",
                     "OT_LIB=${HOME}/opt-ot/lib",
                     "OT_RUNPATH=1",
-                    "USE_PCRE=1",
-                    "USE_PCRE_JIT=1",
+                    "USE_PCRE2=1",
+                    "USE_PCRE2_JIT=1",
                     "USE_LUA=1",
                     "USE_OPENSSL=1",
                     "USE_SYSTEMD=1",
@@ -195,7 +190,7 @@ def main(ref_name):
             "OPENSSL_VERSION=1.0.2u",
             "OPENSSL_VERSION=1.1.1s",
             "QUICTLS=yes",
-            "WOLFSSL_VERSION=5.6.6",
+            "WOLFSSL_VERSION=5.7.0",
             "AWS_LC_VERSION=1.16.0",
             # "BORINGSSL=yes",
         ]
@@ -236,9 +231,9 @@ def main(ref_name):
     # macOS
 
     if "haproxy-" in ref_name:
-        os = "macos-12"     # stable branch
+        os = "macos-13"     # stable branch
     else:
-        os = "macos-latest" # development branch
+        os = "macos-14"     # development branch
 
     TARGET = "osx"
     for CC in ["clang"]:

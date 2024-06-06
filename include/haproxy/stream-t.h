@@ -40,7 +40,7 @@
  */
 #define SF_DIRECT	0x00000001	/* connection made on the server matching the client cookie */
 #define SF_ASSIGNED	0x00000002	/* no need to assign a server to this stream */
-/* unused: 0x00000004 */
+#define SF_MAYALLOC     0x00000004      /* we were notified that a work buffer might be available now */
 #define SF_BE_ASSIGNED	0x00000008	/* a backend was assigned. Conns are accounted. */
 
 #define SF_FORCE_PRST	0x00000010	/* force persistence here, even if server is down */
@@ -86,6 +86,8 @@
 #define SF_SRV_REUSED_ANTICIPATED  0x00200000  /* the connection was reused but the mux is not ready yet */
 #define SF_WEBSOCKET    0x00400000	/* websocket stream */ // TODO: must be removed
 #define SF_SRC_ADDR     0x00800000	/* get the source ip/port with getsockname */
+#define SF_BC_MARK      0x01000000	/* need to set specific mark on backend/srv conn upon connect */
+#define SF_BC_TOS       0x02000000	/* need to set specific tos on backend/srv conn upon connect */
 
 /* This function is used to report flags in debugging tools. Please reflect
  * below any single-bit flag addition above in the same order via the
@@ -100,7 +102,7 @@ static forceinline char *strm_show_flags(char *buf, size_t len, const char *deli
 	_(0);
 	/* flags & enums */
 	_(SF_IGNORE_PRST, _(SF_SRV_REUSED, _(SF_SRV_REUSED_ANTICIPATED,
-	_(SF_WEBSOCKET, _(SF_SRC_ADDR)))));
+	_(SF_WEBSOCKET, _(SF_SRC_ADDR, _(SF_BC_MARK, _(SF_BC_TOS)))))));
 
 	_e(SF_FINST_MASK, SF_FINST_R,    _e(SF_FINST_MASK, SF_FINST_C,
 	_e(SF_FINST_MASK, SF_FINST_H,    _e(SF_FINST_MASK, SF_FINST_D,
@@ -114,9 +116,9 @@ static forceinline char *strm_show_flags(char *buf, size_t len, const char *deli
 	_e(SF_ERR_MASK, SF_ERR_DOWN,     _e(SF_ERR_MASK, SF_ERR_KILLED,
 	_e(SF_ERR_MASK, SF_ERR_UP,       _e(SF_ERR_MASK, SF_ERR_CHK_PORT))))))))))));
 
-	_(SF_DIRECT, _(SF_ASSIGNED, _(SF_BE_ASSIGNED, _(SF_FORCE_PRST,
+	_(SF_DIRECT, _(SF_ASSIGNED, _(SF_MAYALLOC, _(SF_BE_ASSIGNED, _(SF_FORCE_PRST,
 	_(SF_MONITOR, _(SF_CURR_SESS, _(SF_CONN_EXP, _(SF_REDISP,
-	_(SF_IGNORE, _(SF_REDIRECTABLE, _(SF_HTX)))))))))));
+	_(SF_IGNORE, _(SF_REDIRECTABLE, _(SF_HTX))))))))))));
 
 	/* epilogue */
 	_(~0U);
@@ -209,6 +211,9 @@ struct stream {
 
 	int flags;                      /* some flags describing the stream */
 	unsigned int uniq_id;           /* unique ID used for the traces */
+	uint32_t bc_mark;               /* set mark on back conn if SF_BC_MARK is set */
+	uint8_t bc_tos;                 /* set tos on back conn if SF_BC_TOS is set */
+	/* 3 unused bytes here */
 	enum obj_type *target;          /* target to use for this stream */
 
 	struct session *sess;           /* the session this stream is attached to */
@@ -279,7 +284,7 @@ struct stream {
 	int last_rule_line;                     /* last evaluated final rule's line (def: 0) */
 
 	unsigned int stream_epoch;              /* copy of stream_epoch when the stream was created */
-	struct hlua *hlua;                      /* lua runtime context */
+	struct hlua *hlua[2];                   /* lua runtime context (0: global, 1: per-thread) */
 
 	/* Context */
 	struct {

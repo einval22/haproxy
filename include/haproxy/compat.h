@@ -94,11 +94,19 @@ typedef struct { } empty_t;
 #endif
 
 #ifndef MIN
-#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#define MIN(a, b) ({				\
+	typeof(a) _a = (a);			\
+	typeof(a) _b = (b);			\
+	((_a < _b) ? _a : _b);			\
+})
 #endif
 
 #ifndef MAX
-#define MAX(a, b) (((a) > (b)) ? (a) : (b))
+#define MAX(a, b) ({				\
+	typeof(a) _a = (a);			\
+	typeof(a) _b = (b);			\
+	((_a > _b) ? _a : _b);			\
+})
 #endif
 
 /* this is for libc5 for example */
@@ -301,6 +309,12 @@ typedef struct { } empty_t;
  */
 #if !defined(CLOCK_MONOTONIC_COARSE) && defined(CLOCK_MONOTONIC_FAST)
 #define CLOCK_MONOTONIC_COARSE CLOCK_MONOTONIC_FAST
+#endif
+
+/* On Solaris, `queue` is a reserved name, so we redefine it here for now.
+ */
+#if defined(sun)
+#define queue _queue
 #endif
 
 #endif /* _HAPROXY_COMPAT_H */

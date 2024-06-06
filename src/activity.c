@@ -647,16 +647,11 @@ static int cli_io_handler_show_profiling(struct appctx *appctx)
 	unsigned long long tot_alloc_calls, tot_free_calls;
 	unsigned long long tot_alloc_bytes, tot_free_bytes;
 #endif
-	struct stconn *sc = appctx_sc(appctx);
 	struct buffer *name_buffer = get_trash_chunk();
 	const struct ha_caller *caller;
 	const char *str;
 	int max_lines;
 	int i, j, max;
-
-	/* FIXME: Don't watch the other side ! */
-	if (unlikely(sc_opposite(sc)->flags & SC_FL_SHUT_DONE))
-		return 1;
 
 	chunk_reset(&trash);
 
@@ -808,8 +803,14 @@ static int cli_io_handler_show_profiling(struct appctx *appctx)
 		else
 			chunk_appendf(&trash, "[other]");
 
-		chunk_appendf(&trash," %s(%lld)", memprof_methods[entry->method],
-			      (long long)(entry->alloc_tot - entry->free_tot) / (long long)(entry->alloc_calls + entry->free_calls));
+		if ((tmp_memstats[i].method != MEMPROF_METH_P_ALLOC) &&
+		    (tmp_memstats[i].method != MEMPROF_METH_MALLOC) &&
+		    (tmp_memstats[i].method != MEMPROF_METH_CALLOC)) {
+			chunk_appendf(&trash," %s(%lld)", memprof_methods[entry->method],
+				(long long)(entry->alloc_tot - entry->free_tot) / (long long)(entry->alloc_calls + entry->free_calls));
+		} else
+			chunk_appendf(&trash," %s(%lld)", memprof_methods[entry->method],
+				(long long)(entry->alloc_tot) / (long long)(entry->alloc_calls));
 
 		if (entry->alloc_tot && entry->free_tot) {
 			/* that's a realloc, show the total diff to help spot leaks */
@@ -834,9 +835,13 @@ static int cli_io_handler_show_profiling(struct appctx *appctx)
 	tot_alloc_calls = tot_free_calls = tot_alloc_bytes = tot_free_bytes = 0;
 	for (i = 0; i < max_lines; i++) {
 		tot_alloc_calls += tmp_memstats[i].alloc_calls;
-		tot_free_calls  += tmp_memstats[i].free_calls;
 		tot_alloc_bytes += tmp_memstats[i].alloc_tot;
-		tot_free_bytes  += tmp_memstats[i].free_tot;
+		if ((tmp_memstats[i].method != MEMPROF_METH_P_ALLOC) &&
+		    (tmp_memstats[i].method != MEMPROF_METH_MALLOC) &&
+		    (tmp_memstats[i].method != MEMPROF_METH_CALLOC)) {
+			tot_free_calls  += tmp_memstats[i].free_calls;
+			tot_free_bytes  += tmp_memstats[i].free_tot;
+		}
 	}
 
 	chunk_appendf(&trash,
@@ -911,7 +916,6 @@ static int cli_parse_show_profiling(char **args, char *payload, struct appctx *a
 static int cli_io_handler_show_tasks(struct appctx *appctx)
 {
 	struct sched_activity tmp_activity[SCHED_ACT_HASH_BUCKETS] __attribute__((aligned(64)));
-	struct stconn *sc = appctx_sc(appctx);
 	struct buffer *name_buffer = get_trash_chunk();
 	struct sched_activity *entry;
 	const struct tasklet *tl;
@@ -921,10 +925,6 @@ static int cli_io_handler_show_tasks(struct appctx *appctx)
 	uint64_t tot_calls;
 	int thr, queue;
 	int i, max;
-
-	/* FIXME: Don't watch the other side ! */
-	if (unlikely(sc_opposite(sc)->flags & SC_FL_SHUT_DONE))
-		return 1;
 
 	/* It's not possible to scan queues in small chunks and yield in the
 	 * middle of the dump and come back again. So what we're doing instead
@@ -1057,16 +1057,11 @@ static int cli_io_handler_show_tasks(struct appctx *appctx)
  */
 static int cli_io_handler_show_activity(struct appctx *appctx)
 {
-	struct stconn *sc = appctx_sc(appctx);
 	struct show_activity_ctx *actctx = appctx->svcctx;
 	int tgt = actctx->thr; // target thread, -1 for all, 0 for total only
 	uint up_sec, up_usec;
 	int base_line;
 	ullong up;
-
-	/* FIXME: Don't watch the other side ! */
-	if (unlikely(sc_opposite(sc)->flags & SC_FL_SHUT_DONE))
-		return 1;
 
 	/* this macro is used below to dump values. The thread number is "thr",
 	 * and runs from 0 to nbt-1 when values are printed using the formula.

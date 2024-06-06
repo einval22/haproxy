@@ -161,7 +161,9 @@ void qc_kill_conn(struct quic_conn *qc)
 	TRACE_PROTO("killing the connection", QUIC_EV_CONN_KILL, qc);
 	qc->flags |= QUIC_FL_CONN_TO_KILL;
 	qc->flags &= ~QUIC_FL_CONN_RETRANS_NEEDED;
-	task_wakeup(qc->idle_timer_task, TASK_WOKEN_OTHER);
+
+	if (!(qc->flags & QUIC_FL_CONN_EXP_TIMER))
+		task_wakeup(qc->idle_timer_task, TASK_WOKEN_OTHER);
 
 	qc_notify_err(qc);
 
@@ -355,7 +357,7 @@ int qc_h3_request_reject(struct quic_conn *qc, uint64_t id)
 	int ret = 0;
 	struct quic_frame *ss, *rs;
 	struct quic_enc_level *qel = qc->ael;
-	const uint64_t app_error_code = H3_REQUEST_REJECTED;
+	const uint64_t app_error_code = H3_ERR_REQUEST_REJECTED;
 
 	TRACE_ENTER(QUIC_EV_CONN_PRSHPKT, qc);
 
@@ -544,10 +546,10 @@ int quic_build_post_handshake_frames(struct quic_conn *qc)
 	goto leave;
 }
 
-
 /* QUIC connection packet handler task (post handshake) */
 struct task *quic_conn_app_io_cb(struct task *t, void *context, unsigned int state)
 {
+	struct list send_list = LIST_HEAD_INIT(send_list);
 	struct quic_conn *qc = context;
 	struct quic_enc_level *qel;
 
@@ -592,9 +594,13 @@ struct task *quic_conn_app_io_cb(struct task *t, void *context, unsigned int sta
 		goto out;
 	}
 
+	if (!qel_need_sending(qel, qc))
+		goto out;
+
 	/* XXX TODO: how to limit the list frames to send */
-	if (!qc_send_app_pkts(qc, &qel->pktns->tx.frms)) {
-		TRACE_DEVEL("qc_send_app_pkts() failed", QUIC_EV_CONN_IO_CB, qc);
+	qel_register_send(&send_list, qel, &qel->pktns->tx.frms);
+	if (!qc_send(qc, 0, &send_list)) {
+		TRACE_DEVEL("qc_send() failed", QUIC_EV_CONN_IO_CB, qc);
 		goto out;
 	}
 
@@ -741,9 +747,9 @@ static struct quic_conn_closed *qc_new_cc_conn(struct quic_conn *qc)
 /* QUIC connection packet handler task. */
 struct task *quic_conn_io_cb(struct task *t, void *context, unsigned int state)
 {
-	int ret;
 	struct quic_conn *qc = context;
-	struct buffer *buf = NULL;
+	struct list send_list = LIST_HEAD_INIT(send_list);
+	struct quic_enc_level *qel;
 	int st;
 	struct tasklet *tl = (struct tasklet *)t;
 
@@ -753,8 +759,8 @@ struct task *quic_conn_io_cb(struct task *t, void *context, unsigned int state)
 	TRACE_PROTO("connection state", QUIC_EV_CONN_IO_CB, qc, &st);
 
 	if (HA_ATOMIC_LOAD(&tl->state) & TASK_HEAVY) {
-		HA_ATOMIC_AND(&tl->state, ~TASK_HEAVY);
 		qc_ssl_provide_all_quic_data(qc, qc->xprt_ctx);
+		HA_ATOMIC_AND(&tl->state, ~TASK_HEAVY);
 	}
 
 	/* Retranmissions */
@@ -770,11 +776,6 @@ struct task *quic_conn_io_cb(struct task *t, void *context, unsigned int state)
 
 	if (!qc_treat_rx_pkts(qc))
 		goto out;
-
-	if (HA_ATOMIC_LOAD(&tl->state) & TASK_HEAVY) {
-		tasklet_wakeup(tl);
-		goto out;
-	}
 
 	if (qc->flags & QUIC_FL_CONN_TO_KILL) {
 		TRACE_DEVEL("connection to be killed", QUIC_EV_CONN_PHPKTS, qc);
@@ -797,33 +798,20 @@ struct task *quic_conn_io_cb(struct task *t, void *context, unsigned int state)
 		}
 	}
 
-	buf = qc_get_txb(qc);
-	if (!buf)
-		goto out;
-
-	if (b_data(buf) && !qc_purge_txbuf(qc, buf))
-		goto out;
-
-	/* Currently buf cannot be non-empty at this stage. Even if a previous
-	 * sendto() has failed it is emptied to simulate packet emission and
-	 * rely on QUIC lost detection to try to emit it.
-	 */
-	BUG_ON_HOT(b_data(buf));
-	b_reset(buf);
-
-	ret = qc_prep_hpkts(qc, buf, NULL);
-	if (ret == -1) {
-		qc_txb_release(qc);
-		goto out;
+	/* Insert each QEL into sending list if needed. */
+	list_for_each_entry(qel, &qc->qel_list, list) {
+		if (qel_need_sending(qel, qc))
+			qel_register_send(&send_list, qel, &qel->pktns->tx.frms);
 	}
 
-	if (ret && !qc_send_ppkts(buf, qc->xprt_ctx)) {
-		if (qc->flags & QUIC_FL_CONN_TO_KILL)
-			qc_txb_release(qc);
+	/* Skip sending if no QEL with frames to sent. */
+	if (LIST_ISEMPTY(&send_list))
+		goto out;
+
+	if (!qc_send(qc, 0, &send_list)) {
+		TRACE_DEVEL("qc_send() failed", QUIC_EV_CONN_IO_CB, qc);
 		goto out;
 	}
-
-	qc_txb_release(qc);
 
  out:
 	/* Release the Handshake encryption level and packet number space if
@@ -1818,7 +1806,14 @@ int qc_set_tid_affinity(struct quic_conn *qc, uint new_tid, struct listener *new
 	qc_detach_th_ctx_list(qc, 0);
 
 	node = eb64_first(qc->cids);
-	BUG_ON(!node || eb64_next(node)); /* One and only one CID must be present before affinity rebind. */
+	/* One and only one CID must be present before affinity rebind.
+	 *
+	 * This could be triggered fairly easily if tasklet is scheduled just
+	 * before thread migration for post-handshake state to generate new
+	 * CIDs. In this case, QUIC_FL_CONN_IO_TO_REQUEUE should be used
+	 * instead of tasklet_wakeup().
+	 */
+	BUG_ON(!node || eb64_next(node));
 	conn_id = eb64_entry(node, struct quic_connection_id, seq_num);
 
 	/* At this point no connection was accounted for yet on this

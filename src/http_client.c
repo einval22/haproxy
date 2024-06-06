@@ -190,7 +190,6 @@ err:
 static int hc_cli_io_handler(struct appctx *appctx)
 {
 	struct hcli_svc_ctx *ctx = appctx->svcctx;
-	struct stconn *sc = appctx_sc(appctx);
 	struct httpclient *hc = ctx->hc;
 	struct http_hdr *hdrs, *hdr;
 
@@ -217,10 +216,7 @@ static int hc_cli_io_handler(struct appctx *appctx)
 	}
 
 	if (ctx->flags & HC_F_RES_BODY) {
-		int ret;
-
-		ret = httpclient_res_xfer(hc, sc_ib(sc));
-		channel_add_input(sc_ic(sc), ret); /* forward what we put in the buffer channel */
+		httpclient_res_xfer(hc, &appctx->outbuf);
 
 		/* remove the flag if the buffer was emptied */
 		if (httpclient_data(hc))
@@ -281,11 +277,14 @@ int httpclient_req_gen(struct httpclient *hc, const struct ist url, enum http_me
 	struct htx *htx;
 	int err_code = 0;
 	struct ist meth_ist, vsn;
-	unsigned int flags = HTX_SL_F_VER_11 | HTX_SL_F_NORMALIZED_URI | HTX_SL_F_HAS_SCHM;
+	unsigned int flags = HTX_SL_F_VER_11 | HTX_SL_F_HAS_SCHM | HTX_SL_F_HAS_AUTHORITY;
 	int i;
 	int foundhost = 0, foundaccept = 0, foundua = 0;
 
-	if (!b_alloc(&hc->req.buf))
+	if (!(hc->flags & HC_F_HTTPPROXY))
+		flags |= HTX_SL_F_NORMALIZED_URI;
+
+	if (!b_alloc(&hc->req.buf, DB_CHANNEL))
 		goto error;
 
 	if (meth >= HTTP_METH_OTHER)
@@ -403,7 +402,7 @@ int httpclient_req_xfer(struct httpclient *hc, struct ist src, int end)
 	int ret = 0;
 	struct htx *htx;
 
-	if (!b_alloc(&hc->req.buf))
+	if (!b_alloc(&hc->req.buf, DB_CHANNEL))
 		goto error;
 
 	htx = htx_from_buf(&hc->req.buf);
@@ -704,7 +703,7 @@ void httpclient_applet_io_handler(struct appctx *appctx)
 	uint32_t sz;
 	int ret;
 
-	if (unlikely(se_fl_test(appctx->sedesc, (SE_FL_EOS|SE_FL_ERROR|SE_FL_SHR|SE_FL_SHW)))) {
+	if (unlikely(se_fl_test(appctx->sedesc, (SE_FL_EOS|SE_FL_ERROR)))) {
 		if (co_data(res)) {
 			htx = htx_from_buf(&res->buf);
 			co_htx_skip(res, htx, co_data(res));
@@ -918,7 +917,7 @@ void httpclient_applet_io_handler(struct appctx *appctx)
 				if (htx_is_empty(htx))
 					goto out;
 
-				if (!b_alloc(&hc->res.buf))
+				if (!b_alloc(&hc->res.buf, DB_MUX_TX))
 					goto out;
 
 				if (b_full(&hc->res.buf))
@@ -1223,7 +1222,8 @@ struct proxy *httpclient_create_proxy(const char *id)
 	px->timeout.connect = httpclient_timeout_connect;
 	px->timeout.client = TICK_ETERNITY;
 	/* The HTTP Client use the "option httplog" with the global loggers */
-	px->conf.logformat_string = httpclient_log_format;
+	px->logformat.str = httpclient_log_format;
+	px->logformat.conf.file = strdup("httpclient");
 	px->http_needed = 1;
 
 	/* clear HTTP server */
@@ -1343,9 +1343,9 @@ static int httpclient_precheck()
 
 	httpclient_proxy = httpclient_create_proxy("<HTTPCLIENT>");
 	if (!httpclient_proxy)
-		return 1;
+		return ERR_RETRYABLE;
 
-	return 0;
+	return ERR_NONE;
 }
 
 /* Initialize the logs for every proxy dedicated to the httpclient */
@@ -1376,18 +1376,6 @@ static int httpclient_postcheck_proxy(struct proxy *curproxy)
 		}
 		LIST_APPEND(&curproxy->loggers, &node->list);
 	}
-	if (curproxy->conf.logformat_string) {
-		curproxy->conf.args.ctx = ARGC_LOG;
-		if (!parse_logformat_string(curproxy->conf.logformat_string, curproxy, &curproxy->logformat,
-					    LOG_OPT_MANDATORY|LOG_OPT_MERGE_SPACES,
-					    SMP_VAL_FE_LOG_END, &errmsg)) {
-			memprintf(&errmsg, "failed to parse log-format : %s.", errmsg);
-			err_code |= ERR_ALERT | ERR_FATAL;
-			goto err;
-		}
-		curproxy->conf.args.file = NULL;
-		curproxy->conf.args.line = 0;
-	}
 
 #ifdef USE_OPENSSL
 	/* initialize the SNI for the SSL servers */
@@ -1401,9 +1389,22 @@ static int httpclient_postcheck_proxy(struct proxy *curproxy)
 		/* init the SNI expression */
 		/* always use the host header as SNI, without the port */
 		srv_ssl->sni_expr = strdup("req.hdr(host),field(1,:)");
-		err_code |= server_parse_sni_expr(srv_ssl, curproxy, &errmsg);
-		if (err_code & ERR_CODE) {
-			memprintf(&errmsg, "failed to configure sni: %s.", errmsg);
+		srv_ssl->ssl_ctx.sni = _parse_srv_expr(srv_ssl->sni_expr,
+		                                       &curproxy->conf.args,
+		                                       NULL, 0, NULL);
+		if (!srv_ssl->ssl_ctx.sni) {
+			memprintf(&errmsg, "failed to configure sni.");
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto err;
+		}
+
+		srv_ssl->pool_conn_name = strdup(srv_ssl->sni_expr);
+		srv_ssl->pool_conn_name_expr = _parse_srv_expr(srv_ssl->pool_conn_name,
+		                                               &curproxy->conf.args,
+		                                               NULL, 0, NULL);
+		if (!srv_ssl->pool_conn_name_expr) {
+			memprintf(&errmsg, "failed to configure pool-conn-name.");
+			err_code |= ERR_ALERT | ERR_FATAL;
 			goto err;
 		}
 	}

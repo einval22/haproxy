@@ -39,6 +39,7 @@
 #include <haproxy/lb_fwlc.h>
 #include <haproxy/lb_fwrr.h>
 #include <haproxy/lb_map.h>
+#include <haproxy/lb_ss.h>
 #include <haproxy/log.h>
 #include <haproxy/namespace.h>
 #include <haproxy/obj_type.h>
@@ -60,14 +61,6 @@
 #include <haproxy/trace.h>
 
 #define TRACE_SOURCE &trace_strm
-
-int be_lastsession(const struct proxy *be)
-{
-	if (be->be_counters.last_sess)
-		return ns_to_sec(now_ns) - be->be_counters.last_sess;
-
-	return -1;
-}
 
 /* helper function to invoke the correct hash method */
 unsigned int gen_hash(const struct proxy* px, const char* key, unsigned long len)
@@ -653,9 +646,9 @@ int assign_server(struct stream *s)
 	if ((s->be->lbprm.algo & BE_LB_KIND) != BE_LB_KIND_HI &&
 	    ((s->sess->flags & SESS_FL_PREFER_LAST) ||
 	     (s->be->options & PR_O_PREF_LAST))) {
-		struct sess_srv_list *srv_list;
-		list_for_each_entry(srv_list, &s->sess->srv_list, srv_list) {
-			struct server *tmpsrv = objt_server(srv_list->target);
+		struct sess_priv_conns *pconns;
+		list_for_each_entry(pconns, &s->sess->priv_conns, sess_el) {
+			struct server *tmpsrv = objt_server(pconns->target);
 
 			if (tmpsrv && tmpsrv->proxy == s->be &&
 			    ((s->sess->flags & SESS_FL_PREFER_LAST) ||
@@ -663,7 +656,7 @@ int assign_server(struct stream *s)
 			      server_has_room(tmpsrv) || (
 			      tmpsrv->queue.length + 1 < s->be->max_ka_queue))) &&
 			    srv_currently_usable(tmpsrv)) {
-				list_for_each_entry(conn, &srv_list->conn_list, session_list) {
+				list_for_each_entry(conn, &pconns->conn_list, sess_el) {
 					if (!(conn->flags & CO_FL_WAIT_XPRT)) {
 						srv = tmpsrv;
 						s->target = &srv->obj_type;
@@ -813,6 +806,14 @@ int assign_server(struct stream *s)
 			break;
 
 		default:
+			if ((s->be->lbprm.algo & BE_LB_KIND) == BE_LB_KIND_SA) {
+				/* some special algos that cannot be grouped together */
+
+				if ((s->be->lbprm.algo & BE_LB_PARM) == BE_LB_SA_SS)
+					srv = ss_get_server(s->be);
+
+				break;
+			}
 			/* unknown balancing algorithm */
 			err = SRV_STATUS_INTERNAL;
 			goto out;
@@ -1232,7 +1233,7 @@ struct connection *conn_backend_get(struct stream *s, struct server *srv, int is
 			continue;
 		conn = srv_lookup_conn(is_safe ? &srv->per_thr[i].safe_conns : &srv->per_thr[i].idle_conns, hash);
 		while (conn) {
-			if (conn->mux->takeover && conn->mux->takeover(conn, i) == 0) {
+			if (conn->mux->takeover && conn->mux->takeover(conn, i, 0) == 0) {
 				conn_delete_from_tree(conn);
 				_HA_ATOMIC_INC(&activity[tid].fd_takeover);
 				found = 1;
@@ -1245,7 +1246,7 @@ struct connection *conn_backend_get(struct stream *s, struct server *srv, int is
 		if (!found && !is_safe && srv->curr_safe_nb > 0) {
 			conn = srv_lookup_conn(&srv->per_thr[i].safe_conns, hash);
 			while (conn) {
-				if (conn->mux->takeover && conn->mux->takeover(conn, i) == 0) {
+				if (conn->mux->takeover && conn->mux->takeover(conn, i, 0) == 0) {
 					conn_delete_from_tree(conn);
 					_HA_ATOMIC_INC(&activity[tid].fd_takeover);
 					found = 1;
@@ -1348,9 +1349,7 @@ int connect_server(struct stream *s)
 	int reuse = 0;
 	int init_mux = 0;
 	int err;
-#ifdef USE_OPENSSL
-	struct sample *sni_smp = NULL;
-#endif
+	struct sample *name_smp = NULL;
 	struct sockaddr_storage *bind_addr = NULL;
 	int proxy_line_ret;
 	int64_t hash = 0;
@@ -1372,13 +1371,11 @@ int connect_server(struct stream *s)
 	if (err != SRV_STATUS_OK)
 		return SF_ERR_INTERNAL;
 
-#ifdef USE_OPENSSL
-	if (srv && srv->ssl_ctx.sni) {
-		sni_smp = sample_fetch_as_type(s->be, s->sess, s,
-		                               SMP_OPT_DIR_REQ | SMP_OPT_FINAL,
-		                               srv->ssl_ctx.sni, SMP_T_STR);
+	if (srv && srv->pool_conn_name_expr) {
+		name_smp = sample_fetch_as_type(s->be, s->sess, s,
+		                                SMP_OPT_DIR_REQ | SMP_OPT_FINAL,
+		                                srv->pool_conn_name_expr, SMP_T_STR);
 	}
-#endif
 
 	/* do not reuse if mode is not http */
 	if (!IS_HTX_STRM(s)) {
@@ -1402,17 +1399,12 @@ int connect_server(struct stream *s)
 	/* 1. target */
 	hash_params.target = s->target;
 
-#ifdef USE_OPENSSL
-	/* 2. sni
-	 * only test if the sample is not null as smp_make_safe (called before
-	 * ssl_sock_set_servername) can only fails if this is not the case
-	 */
-	if (sni_smp) {
-		hash_params.sni_prehash =
-		  conn_hash_prehash(sni_smp->data.u.str.area,
-		                    sni_smp->data.u.str.data);
+	/* 2. pool-conn-name */
+	if (name_smp) {
+		hash_params.name_prehash =
+		  conn_hash_prehash(name_smp->data.u.str.area,
+		                    name_smp->data.u.str.data);
 	}
-#endif /* USE_OPENSSL */
 
 	/* 3. destination address */
 	if (srv && srv_is_transparent(srv))
@@ -1423,10 +1415,40 @@ int connect_server(struct stream *s)
 
 	/* 5. proxy protocol */
 	if (srv && srv->pp_opts) {
-		proxy_line_ret = make_proxy_line(trash.area, trash.size, srv, cli_conn, s);
+		proxy_line_ret = make_proxy_line(trash.area, trash.size, srv, cli_conn, s, strm_sess(s));
 		if (proxy_line_ret) {
 			hash_params.proxy_prehash =
 			  conn_hash_prehash(trash.area, proxy_line_ret);
+		}
+	}
+
+	/* 6. Custom mark, tos? */
+	if (s->flags & (SF_BC_MARK | SF_BC_TOS)) {
+		/* mark: 32bits, tos: 8bits = 40bits
+		 * last 2 bits are there to indicate if mark and/or tos are set
+		 * total: 42bits:
+		 *
+		 * 63==== (unused) ====42    39----32 31-----------------------------0
+		 * 0000000000000000000000 11 00000111 00000000000000000000000000000011
+		 *                        ^^ ^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+		 *                        ||    |                     |
+		 *                       /  \    \                     \
+		 *                      /    \    \                     \
+		 *                    tos?   mark? \             mark value (32bits)
+		 *                            tos value (8bits)
+		 * ie: in the above example:
+		 *  - mark is set, mark = 3
+		 *  - tos is set, tos = 7
+		 */
+		if (s->flags & SF_BC_MARK) {
+			hash_params.mark_tos_prehash |= s->bc_mark;
+			/* 41th bit: mark set */
+			hash_params.mark_tos_prehash |= 1ULL << 40;
+		}
+		if (s->flags & SF_BC_TOS) {
+			hash_params.mark_tos_prehash |= (uint64_t)s->bc_tos << 32;
+			/* 42th bit: tos set */
+			hash_params.mark_tos_prehash |= 1ULL << 41;
 		}
 	}
 
@@ -1617,6 +1639,18 @@ skip_reuse:
 			srv_conn->src = bind_addr;
 			bind_addr = NULL;
 
+			/* mark? */
+			if (s->flags & SF_BC_MARK) {
+				srv_conn->mark = s->bc_mark;
+				srv_conn->flags |= CO_FL_OPT_MARK;
+			}
+
+			/* tos? */
+			if (s->flags & SF_BC_TOS) {
+				srv_conn->tos = s->bc_tos;
+				srv_conn->flags |= CO_FL_OPT_TOS;
+			}
+
 			srv_conn->hash_node->node.key = hash;
 		}
 	}
@@ -1744,7 +1778,13 @@ skip_reuse:
 		return err;
 
 #ifdef USE_OPENSSL
-	if (!(s->flags & SF_SRV_REUSED)) {
+	/* Set socket SNI unless connection is reused. */
+	if (srv && srv->ssl_ctx.sni && !(s->flags & SF_SRV_REUSED)) {
+		struct sample *sni_smp = NULL;
+
+		sni_smp = sample_fetch_as_type(s->be, s->sess, s,
+		                               SMP_OPT_DIR_REQ | SMP_OPT_FINAL,
+		                               srv->ssl_ctx.sni, SMP_T_STR);
 		if (smp_make_safe(sni_smp))
 			ssl_sock_set_servername(srv_conn, sni_smp->data.u.str.area);
 	}
@@ -2515,8 +2555,8 @@ void back_handle_st_rdy(struct stream *s)
  */
 void set_backend_down(struct proxy *be)
 {
-	be->last_change = ns_to_sec(now_ns);
-	_HA_ATOMIC_INC(&be->down_trans);
+	be->be_counters.last_change = ns_to_sec(now_ns);
+	_HA_ATOMIC_INC(&be->be_counters.down_trans);
 
 	if (!(global.mode & MODE_STARTING)) {
 		ha_alert("%s '%s' has no server available!\n", proxy_type_str(be), be->id);
@@ -2588,10 +2628,10 @@ no_cookie:
 }
 
 int be_downtime(struct proxy *px) {
-	if (px->lbprm.tot_weight && px->last_change < ns_to_sec(now_ns))  // ignore negative time
+	if (px->lbprm.tot_weight && px->be_counters.last_change < ns_to_sec(now_ns))  // ignore negative time
 		return px->down_time;
 
-	return ns_to_sec(now_ns) - px->last_change + px->down_time;
+	return ns_to_sec(now_ns) - px->be_counters.last_change + px->down_time;
 }
 
 /*
@@ -2836,7 +2876,7 @@ int backend_parse_balance(const char **args, char **err, struct proxy *curproxy)
 	}
 	else if (strcmp(args[0], "sticky") == 0) {
 		curproxy->lbprm.algo &= ~BE_LB_ALGO;
-		curproxy->lbprm.algo |= BE_LB_ALGO_LS;
+		curproxy->lbprm.algo |= BE_LB_ALGO_SS;
 	}
 	else {
 		memprintf(err, "only supports 'roundrobin', 'static-rr', 'leastconn', 'source', 'uri', 'url_param', 'hash', 'hdr(name)', 'rdp-cookie(name)', 'log-hash' and 'sticky' options.");
@@ -3029,7 +3069,7 @@ smp_fetch_be_sess_rate(const struct arg *args, struct sample *smp, const char *k
 
 	smp->flags = SMP_F_VOL_TEST;
 	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = read_freq_ctr(&px->be_sess_per_sec);
+	smp->data.u.sint = read_freq_ctr(&px->be_counters.sess_per_sec);
 	return 1;
 }
 
@@ -3212,7 +3252,7 @@ smp_fetch_srv_sess_rate(const struct arg *args, struct sample *smp, const char *
 {
 	smp->flags = SMP_F_VOL_TEST;
 	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = read_freq_ctr(&args->data.srv->sess_per_sec);
+	smp->data.u.sint = read_freq_ctr(&args->data.srv->counters.sess_per_sec);
 	return 1;
 }
 

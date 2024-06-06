@@ -324,8 +324,8 @@ static int mux_pt_init(struct connection *conn, struct proxy *prx, struct sessio
 	}
 	conn->ctx = ctx;
 	se_fl_set(ctx->sd, SE_FL_RCV_MORE);
-	if (global.tune.options & GTUNE_USE_SPLICE)
-		se_fl_set(ctx->sd, SE_FL_MAY_FASTFWD);
+	if ((global.tune.options & GTUNE_USE_SPLICE) && !(global.tune.no_zero_copy_fwd & NO_ZERO_COPY_FWD_PT))
+		se_fl_set(ctx->sd, SE_FL_MAY_FASTFWD_PROD|SE_FL_MAY_FASTFWD_CONS);
 
 	TRACE_LEAVE(PT_EV_CONN_NEW, conn);
 	return 0;
@@ -391,6 +391,8 @@ static int mux_pt_attach(struct connection *conn, struct sedesc *sd, struct sess
 		return -1;
 	ctx->sd = sd;
 	se_fl_set(ctx->sd, SE_FL_RCV_MORE);
+	if ((global.tune.options & GTUNE_USE_SPLICE) && !(global.tune.no_zero_copy_fwd & NO_ZERO_COPY_FWD_PT))
+		se_fl_set(ctx->sd, SE_FL_MAY_FASTFWD_PROD|SE_FL_MAY_FASTFWD_CONS);
 
 	TRACE_LEAVE(PT_EV_STRM_NEW, conn, sd->sc);
 	return 0;
@@ -460,39 +462,30 @@ static int mux_pt_avail_streams(struct connection *conn)
 	return 1 - mux_pt_used_streams(conn);
 }
 
-static void mux_pt_shutr(struct stconn *sc, enum co_shr_mode mode)
+static void mux_pt_shut(struct stconn *sc, enum se_shut_mode mode, struct se_abort_info *reason)
 {
 	struct connection *conn = __sc_conn(sc);
 	struct mux_pt_ctx *ctx = conn->ctx;
 
 	TRACE_ENTER(PT_EV_STRM_SHUT, conn, sc);
+	if (mode & (SE_SHW_SILENT|SE_SHW_NORMAL)) {
+		if (conn_xprt_ready(conn) && conn->xprt->shutw)
+			conn->xprt->shutw(conn, conn->xprt_ctx, (mode & SE_SHW_NORMAL));
+		if (conn->flags & CO_FL_SOCK_RD_SH)
+			conn_full_close(conn);
+		else
+			conn_sock_shutw(conn, (mode & SE_SHW_NORMAL));
+	}
 
-	se_fl_clr(ctx->sd, SE_FL_RCV_MORE | SE_FL_WANT_ROOM);
-	if (conn_xprt_ready(conn) && conn->xprt->shutr)
-		conn->xprt->shutr(conn, conn->xprt_ctx,
-		    (mode == CO_SHR_DRAIN));
-	else if (mode == CO_SHR_DRAIN)
-		conn_ctrl_drain(conn);
-	if (se_fl_test(ctx->sd, SE_FL_SHW))
-		conn_full_close(conn);
-
-	TRACE_LEAVE(PT_EV_STRM_SHUT, conn, sc);
-}
-
-static void mux_pt_shutw(struct stconn *sc, enum co_shw_mode mode)
-{
-	struct connection *conn = __sc_conn(sc);
-	struct mux_pt_ctx *ctx = conn->ctx;
-
-	TRACE_ENTER(PT_EV_STRM_SHUT, conn, sc);
-
-	if (conn_xprt_ready(conn) && conn->xprt->shutw)
-		conn->xprt->shutw(conn, conn->xprt_ctx,
-		    (mode == CO_SHW_NORMAL));
-	if (!se_fl_test(ctx->sd, SE_FL_SHR))
-		conn_sock_shutw(conn, (mode == CO_SHW_NORMAL));
-	else
-		conn_full_close(conn);
+	if (mode & (SE_SHR_RESET|SE_SHR_DRAIN)) {
+		se_fl_clr(ctx->sd, SE_FL_RCV_MORE | SE_FL_WANT_ROOM);
+		if (conn_xprt_ready(conn) && conn->xprt->shutr)
+			conn->xprt->shutr(conn, conn->xprt_ctx, (mode & SE_SHR_DRAIN));
+		else if (mode & SE_SHR_DRAIN)
+			conn_ctrl_drain(conn);
+		if (conn->flags & CO_FL_SOCK_WR_SH)
+			conn_full_close(conn);
+	}
 
 	TRACE_LEAVE(PT_EV_STRM_SHUT, conn, sc);
 }
@@ -580,7 +573,7 @@ static inline struct sedesc *mux_pt_opposite_sd(struct mux_pt_ctx *ctx)
 	return sdo;
 }
 
-static size_t mux_pt_nego_ff(struct stconn *sc, struct buffer *input, size_t count, unsigned int may_splice)
+static size_t mux_pt_nego_ff(struct stconn *sc, struct buffer *input, size_t count, unsigned int flags)
 {
 	struct connection *conn = __sc_conn(sc);
 	struct mux_pt_ctx *ctx = conn->ctx;
@@ -595,7 +588,7 @@ static size_t mux_pt_nego_ff(struct stconn *sc, struct buffer *input, size_t cou
 	 *       and then data in pipe, or the opposite. For now, it is not
 	 *       supported to mix data.
 	 */
-	if (!b_data(input) && may_splice) {
+	if (!b_data(input) && (flags & NEGO_FF_FL_MAY_SPLICE)) {
 		if (conn->xprt->snd_pipe && (ctx->sd->iobuf.pipe || (pipes_used < global.maxpipes && (ctx->sd->iobuf.pipe = get_pipe())))) {
 			ctx->sd->iobuf.offset = 0;
 			ctx->sd->iobuf.data = 0;
@@ -651,14 +644,10 @@ static int mux_pt_fastfwd(struct stconn *sc, unsigned int count, unsigned int fl
 	struct mux_pt_ctx *ctx = conn->ctx;
 	struct sedesc *sdo = NULL;
 	size_t total = 0, try = 0;
+	unsigned int nego_flags = NEGO_FF_FL_NONE;
         int ret = 0;
 
 	TRACE_ENTER(PT_EV_RX_DATA, conn, sc, 0, (size_t[]){count});
-
-	if (global.tune.no_zero_copy_fwd & NO_ZERO_COPY_FWD_PT) {
-		se_fl_clr(ctx->sd, SE_FL_MAY_FASTFWD);
-		goto end;
-	}
 
 	se_fl_clr(ctx->sd, SE_FL_RCV_MORE | SE_FL_WANT_ROOM);
 	conn->flags &= ~CO_FL_WAIT_ROOM;
@@ -668,10 +657,13 @@ static int mux_pt_fastfwd(struct stconn *sc, unsigned int count, unsigned int fl
 		goto out;
 	}
 
-	try = se_nego_ff(sdo, &BUF_NULL, count, conn->xprt->rcv_pipe && !!(flags & CO_RFL_MAY_SPLICE) && !(sdo->iobuf.flags & IOBUF_FL_NO_SPLICING));
+	if (conn->xprt->rcv_pipe && !!(flags & CO_RFL_MAY_SPLICE) && !(sdo->iobuf.flags & IOBUF_FL_NO_SPLICING))
+		nego_flags |= NEGO_FF_FL_MAY_SPLICE;
+
+	try = se_nego_ff(sdo, &BUF_NULL, count, nego_flags);
 	if (sdo->iobuf.flags & IOBUF_FL_NO_FF) {
 		/* Fast forwarding is not supported by the consumer */
-		se_fl_clr(ctx->sd, SE_FL_MAY_FASTFWD);
+		se_fl_clr(ctx->sd, SE_FL_MAY_FASTFWD_PROD);
 		TRACE_DEVEL("Fast-forwarding not supported by opposite endpoint, disable it", PT_EV_RX_DATA, conn, sc);
 		goto end;
 	}
@@ -689,7 +681,7 @@ static int mux_pt_fastfwd(struct stconn *sc, unsigned int count, unsigned int fl
 		if (ret < 0) {
 			TRACE_ERROR("Error when trying to fast-forward data, disable it and abort",
 				    PT_EV_RX_DATA|PT_EV_STRM_ERR|PT_EV_CONN_ERR, conn, sc);
-			se_fl_clr(ctx->sd, SE_FL_MAY_FASTFWD);
+			se_fl_clr(ctx->sd, SE_FL_MAY_FASTFWD_PROD);
 			BUG_ON(sdo->iobuf.pipe->data);
 			put_pipe(sdo->iobuf.pipe);
 			sdo->iobuf.pipe = NULL;
@@ -789,6 +781,7 @@ static int mux_pt_unsubscribe(struct stconn *sc, int event_type, struct wait_eve
 static int mux_pt_ctl(struct connection *conn, enum mux_ctl_type mux_ctl, void *output)
 {
 	int ret = 0;
+
 	switch (mux_ctl) {
 	case MUX_CTL_STATUS:
 		if (!(conn->flags & CO_FL_WAIT_XPRT))
@@ -796,6 +789,10 @@ static int mux_pt_ctl(struct connection *conn, enum mux_ctl_type mux_ctl, void *
 		return ret;
 	case MUX_CTL_EXIT_STATUS:
 		return MUX_ES_UNKNOWN;
+	case MUX_CTL_GET_NBSTRM:
+		return mux_pt_used_streams(conn);
+	case MUX_CTL_GET_MAXSTRM:
+		return 1;
 	default:
 		return -1;
 	}
@@ -865,8 +862,7 @@ const struct mux_ops mux_tcp_ops = {
 	.destroy = mux_pt_destroy_meth,
 	.ctl = mux_pt_ctl,
 	.sctl = mux_pt_sctl,
-	.shutr = mux_pt_shutr,
-	.shutw = mux_pt_shutw,
+	.shut = mux_pt_shut,
 	.flags = MX_FL_NONE,
 	.name = "PASS",
 };
@@ -891,8 +887,7 @@ const struct mux_ops mux_pt_ops = {
 	.destroy = mux_pt_destroy_meth,
 	.ctl = mux_pt_ctl,
 	.sctl = mux_pt_sctl,
-	.shutr = mux_pt_shutr,
-	.shutw = mux_pt_shutw,
+	.shut = mux_pt_shut,
 	.flags = MX_FL_NONE|MX_FL_NO_UPG,
 	.name = "PASS",
 };

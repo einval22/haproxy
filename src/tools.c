@@ -17,9 +17,14 @@
 #endif
 
 #if defined(__FreeBSD__)
+#include <sys/param.h>
+#if __FreeBSD_version < 1300058
 #include <elf.h>
 #include <dlfcn.h>
 extern void *__elf_aux_vector;
+#else
+#include <sys/auxv.h>
+#endif
 #endif
 
 #if defined(__NetBSD__)
@@ -36,6 +41,7 @@ extern void *__elf_aux_vector;
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -45,6 +51,10 @@ extern void *__elf_aux_vector;
 
 #if defined(__linux__) && defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 16))
 #include <sys/auxv.h>
+#endif
+
+#if defined(USE_PRCTL)
+#include <sys/prctl.h>
 #endif
 
 #include <import/eb32sctree.h>
@@ -1964,11 +1974,11 @@ int addr_is_local(const struct netns_entry *ns,
  * <map> with the hexadecimal representation of their ASCII-code (2 digits)
  * prefixed by <escape>, and will store the result between <start> (included)
  * and <stop> (excluded), and will always terminate the string with a '\0'
- * before <stop>. The position of the '\0' is returned if the conversion
- * completes. If bytes are missing between <start> and <stop>, then the
- * conversion will be incomplete and truncated. If <stop> <= <start>, the '\0'
- * cannot even be stored so we return <start> without writing the 0.
+ * before <stop>. If bytes are missing between <start> and <stop>, then the
+ * conversion will be incomplete and truncated.
  * The input string must also be zero-terminated.
+ *
+ * Return the address of the \0 character, or NULL on error
  */
 const char hextab[16] = "0123456789ABCDEF";
 char *encode_string(char *start, char *stop,
@@ -1990,8 +2000,9 @@ char *encode_string(char *start, char *stop,
 			string++;
 		}
 		*start = '\0';
+		return start;
 	}
-	return start;
+	return NULL;
 }
 
 /*
@@ -2020,8 +2031,9 @@ char *encode_chunk(char *start, char *stop,
 			str++;
 		}
 		*start = '\0';
+		return start;
 	}
-	return start;
+	return NULL;
 }
 
 /*
@@ -2030,8 +2042,9 @@ char *encode_chunk(char *start, char *stop,
  * is reached or NULL-byte is encountered. The result will
  * be stored between <start> (included) and <stop> (excluded). This
  * function will always try to terminate the resulting string with a '\0'
- * before <stop>, and will return its position if the conversion
- * completes.
+ * before <stop>.
+ *
+ * Return the address of the \0 character, or NULL on error
  */
 char *escape_string(char *start, char *stop,
 		    const char escape, const long *map,
@@ -2051,8 +2064,167 @@ char *escape_string(char *start, char *stop,
 			string++;
 		}
 		*start = '\0';
+		return start;
+	}
+	return NULL;
+}
+
+/* CBOR helper to encode an uint64 value with prefix (3bits MAJOR type)
+ * according to RFC8949
+ *
+ * CBOR encode ctx is provided in <ctx>
+ *
+ * Returns the position of the last written byte on success and NULL on
+ * error. The function cannot write past <stop>
+ */
+char *cbor_encode_uint64_prefix(struct cbor_encode_ctx *ctx,
+                                char *start, char *stop, uint64_t value,
+                                uint8_t prefix)
+{
+	int nb_bytes = 0;
+
+	/*
+	 * For encoding logic, see:
+	 * https://www.rfc-editor.org/rfc/rfc8949.html#name-specification-of-the-cbor-e
+	 */
+	if (value < 24) {
+		/* argument is the value itself */
+		prefix |= value;
+	}
+	else {
+		if (value <= 0xFFU) {
+			/* 1-byte */
+			nb_bytes = 1;
+			prefix |= 24; // 0x18
+		}
+		else if (value <= 0xFFFFU) {
+			/* 2 bytes */
+			nb_bytes = 2;
+			prefix |= 25; // 0x19
+		}
+		else if (value <= 0xFFFFFFFFU) {
+			/* 4 bytes */
+			nb_bytes = 4;
+			prefix |= 26; // 0x1A
+		}
+		else {
+			/* 8 bytes */
+			nb_bytes = 8;
+			prefix |= 27; // 0x1B
+		}
+	}
+
+	start = ctx->e_fct_byte(ctx, start, stop, prefix);
+	if (start == NULL)
+		return NULL;
+
+	/* encode 1 byte at a time from higher bits to lower bits */
+	while (nb_bytes) {
+		uint8_t cur_byte = (value >> ((nb_bytes - 1) * 8)) & 0xFFU;
+
+		start = ctx->e_fct_byte(ctx, start, stop, cur_byte);
+		if (start == NULL)
+			return NULL;
+
+		nb_bytes--;
+	}
+
+	return start;
+}
+
+/* CBOR helper to encode an int64 value according to RFC8949
+ *
+ * CBOR encode ctx is provided in <ctx>
+ *
+ * Returns the position of the last written byte on success and NULL on
+ * error. The function cannot write past <stop>
+ */
+char *cbor_encode_int64(struct cbor_encode_ctx *ctx,
+                        char *start, char *stop, int64_t value)
+{
+	uint64_t absolute_value = llabs(value);
+	int cbor_prefix;
+
+	/*
+	 * For encoding logic, see:
+	 * https://www.rfc-editor.org/rfc/rfc8949.html#name-specification-of-the-cbor-e
+	 */
+	if (value >= 0)
+		cbor_prefix = 0x00; // unsigned int
+	else {
+		cbor_prefix = 0x20; // negative int
+		/* N-1 for negative int */
+		absolute_value -= 1;
+	}
+	return cbor_encode_uint64_prefix(ctx, start, stop,
+	                                 absolute_value, cbor_prefix);
+}
+
+/* CBOR helper to encode a <prefix> string chunk according to RFC8949
+ *
+ * if <bytes> is NULL, then only the <prefix> (with length) will be
+ * emitted
+ *
+ * CBOR encode ctx is provided in <ctx>
+ *
+ * Returns the position of the last written byte on success and NULL on
+ * error. The function cannot write past <stop>
+ */
+char *cbor_encode_bytes_prefix(struct cbor_encode_ctx *ctx,
+                               char *start, char *stop,
+                               const char *bytes, size_t len,
+                               uint8_t prefix)
+{
+
+	size_t it = 0;
+
+	/* write prefix (with text length as argument) */
+	start = cbor_encode_uint64_prefix(ctx, start, stop,
+	                                  len, prefix);
+	if (start == NULL)
+		return NULL;
+
+	/* write actual bytes if provided */
+	while (bytes && it < len) {
+		start = ctx->e_fct_byte(ctx, start, stop, bytes[it]);
+		if (start == NULL)
+			return NULL;
+		it++;
 	}
 	return start;
+}
+
+/* CBOR helper to encode a text chunk according to RFC8949
+ *
+ * if <text> is NULL, then only the text prefix (with length) will be emitted
+ *
+ * CBOR encode ctx is provided in <ctx>
+ *
+ * Returns the position of the last written byte on success and NULL on
+ * error. The function cannot write past <stop>
+ */
+char *cbor_encode_text(struct cbor_encode_ctx *ctx,
+                       char *start, char *stop,
+                       const char *text, size_t len)
+{
+	return cbor_encode_bytes_prefix(ctx, start, stop, text, len, 0x60);
+}
+
+/* CBOR helper to encode a byte string chunk according to RFC8949
+ *
+ * if <bytes> is NULL, then only the byte string prefix (with length) will be
+ * emitted
+ *
+ * CBOR encode ctx is provided in <ctx>
+ *
+ * Returns the position of the last written byte on success and NULL on
+ * error. The function cannot write past <stop>
+ */
+char *cbor_encode_bytes(struct cbor_encode_ctx *ctx,
+                        char *start, char *stop,
+                        const char *bytes, size_t len)
+{
+	return cbor_encode_bytes_prefix(ctx, start, stop, bytes, len, 0x40);
 }
 
 /* Check a string for using it in a CSV output format. If the string contains
@@ -4455,8 +4627,9 @@ int my_unsetenv(const char *name)
  * corresponding value. A variable is identified as a series of alphanumeric
  * characters or underscores following a '$' sign. The <in> string must be
  * free()able. NULL returns NULL. The resulting string might be reallocated if
- * some expansion is made. Variable names may also be enclosed into braces if
- * needed (eg: to concatenate alphanum characters).
+ * some expansion is made (an NULL will be returned on failure). Variable names
+ * may also be enclosed into braces if needed (eg: to concatenate alphanum
+ * characters).
  */
 char *env_expand(char *in)
 {
@@ -4511,6 +4684,9 @@ char *env_expand(char *in)
 		}
 
 		out = my_realloc2(out, out_len + (txt_end - txt_beg) + val_len + 1);
+		if (!out)
+			goto leave;
+
 		if (txt_end > txt_beg) {
 			memcpy(out + out_len, txt_beg, txt_end - txt_beg);
 			out_len += txt_end - txt_beg;
@@ -4525,6 +4701,7 @@ char *env_expand(char *in)
 
 	/* here we know that <out> was allocated and that we don't need <in> anymore */
 	free(in);
+leave:
 	return out;
 }
 
@@ -4900,6 +5077,58 @@ void dump_addr_and_bytes(struct buffer *buf, const char *pfx, const void *addr, 
 	}
 }
 
+/* Dumps the 64 bytes around <addr> at the end of <output> with symbols
+ * decoding. An optional special pointer may be recognized (special), in
+ * which case its type (spec_type) and name (spec_name) will be reported.
+ * This is convenient for pool names but could be used for list heads or
+ * anything in that vein.
+*/
+void dump_area_with_syms(struct buffer *output, const void *base, const void *addr,
+                         const void *special, const char *spec_type, const char *spec_name)
+{
+	const char *start, *end, *p;
+	const void *tag;
+
+	chunk_appendf(output, "Contents around address %p+%lu=%p:\n", base, (ulong)(addr - base), addr);
+
+	/* dump in word-sized blocks */
+	start = (const void *)(((uintptr_t)addr - 32) & -sizeof(void*));
+	end   = (const void *)(((uintptr_t)addr + 32 + sizeof(void*) - 1) & -sizeof(void*));
+
+	while (start < end) {
+		dump_addr_and_bytes(output, "  ", start, sizeof(void*));
+		chunk_strcat(output, " [");
+		for (p = start; p < start + sizeof(void*); p++) {
+			if (!may_access(p))
+				chunk_strcat(output, "*");
+			else if (isprint((unsigned char)*p))
+				chunk_appendf(output, "%c", *p);
+			else
+				chunk_strcat(output, ".");
+		}
+
+		if (may_access(start))
+			tag = *(const void **)start;
+		else
+			tag = NULL;
+
+		if (special && tag == special) {
+			/* the pool can often be there so let's detect it */
+			chunk_appendf(output, "] [%s:%s", spec_type, spec_name);
+		}
+		else if (tag) {
+			/* print pointers that resolve to a symbol */
+			size_t back_data = output->data;
+			chunk_strcat(output, "] [");
+			if (!resolve_sym_name(output, NULL, tag))
+				output->data = back_data;
+		}
+
+		chunk_strcat(output, "]\n");
+		start = p;
+	}
+}
+
 /* print a line of text buffer (limited to 70 bytes) to <out>. The format is :
  * <2 spaces> <offset=5 digits> <space or plus> <space> <70 chars max> <\n>
  * which is 60 chars per line. Non-printable chars \t, \n, \r and \e are
@@ -5018,6 +5247,7 @@ const char *get_exec_path()
 	if (execfn && execfn != ENOENT)
 		ret = (const char *)execfn;
 #elif defined(__FreeBSD__)
+#if __FreeBSD_version < 1300058
 	Elf_Auxinfo *auxv;
 	for (auxv = __elf_aux_vector; auxv->a_type != AT_NULL; ++auxv) {
 		if (auxv->a_type == AT_EXECPATH) {
@@ -5025,6 +5255,14 @@ const char *get_exec_path()
 			break;
 		}
 	}
+#else
+	static char execpath[MAXPATHLEN];
+
+	if (execpath[0] == '\0')
+		elf_aux_info(AT_EXECPATH, execpath, MAXPATHLEN);
+	if (execpath[0] != '\0')
+		ret = execpath;
+#endif
 #elif defined(__NetBSD__)
 	AuxInfo *auxv;
 	for (auxv = _dlauxinfo(); auxv->a_type != AT_NULL; ++auxv) {
@@ -5511,10 +5749,10 @@ void ha_random_jump96(uint32_t dist)
 	}
 }
 
-/* Generates an RFC4122 UUID into chunk <output> which must be at least 37
- * bytes large.
+/* Generates an RFC 9562 version 4 UUID into chunk
+ * <output> which must be at least 37 bytes large.
  */
-void ha_generate_uuid(struct buffer *output)
+void ha_generate_uuid_v4(struct buffer *output)
 {
 	uint32_t rnd[4];
 	uint64_t last;
@@ -5533,6 +5771,31 @@ void ha_generate_uuid(struct buffer *output)
 	             ((rnd[1] >> 16u) & 0xFFF) | 0x4000,  // highest 4 bits indicate the uuid version
 	             (rnd[2] & 0x3FFF) | 0x8000,  // the highest 2 bits indicate the UUID variant (10),
 	             (long long)((rnd[2] >> 14u) | ((uint64_t) rnd[3] << 18u)) & 0xFFFFFFFFFFFFull);
+}
+
+/* Generates an RFC 9562 version 7 UUID into chunk
+ * <output> which must be at least 37 bytes large.
+ */
+void ha_generate_uuid_v7(struct buffer *output)
+{
+	uint32_t rnd[3];
+	uint64_t last;
+	uint64_t time;
+
+	time = (date.tv_sec * 1000) + (date.tv_usec / 1000);
+	last = ha_random64();
+	rnd[0] = last;
+	rnd[1] = last >> 32;
+
+	last = ha_random64();
+	rnd[2] = last;
+
+	chunk_printf(output, "%8.8x-%4.4x-%4.4x-%4.4x-%12.12llx",
+	             (uint)(time >> 16u),
+	             (uint)(time & 0xFFFF),
+	             ((rnd[0] >> 16u) & 0xFFF) | 0x7000,  // highest 4 bits indicate the uuid version
+	             (rnd[1] & 0x3FFF) | 0x8000,  // the highest 2 bits indicate the UUID variant (10),
+	             (long long)((rnd[1] >> 14u) | ((uint64_t) rnd[2] << 18u)) & 0xFFFFFFFFFFFFull);
 }
 
 
@@ -6206,6 +6469,94 @@ int openssl_compare_current_name(const char *name)
 	return 1;
 }
 
+/* prctl/PR_SET_VMA wrapper to easily give a name to virtual memory areas,
+ * knowing their address and size.
+ *
+ * It is only intended for use with memory allocated using mmap (private or
+ * shared anonymous maps) or malloc (provided that <size> is at least one page
+ * large), which is memory that may be released using munmap(). For memory
+ * allocated using malloc(), no naming will be attempted if the vma is less
+ * than one page large, because naming is only relevant for large memory
+ * blocks. For instance, glibc/malloc() will directly use mmap() once
+ * MMAP_THRESHOLD is reached (defaults to 128K), and will try to use the
+ * heap as much as possible below that.
+ *
+ * <type> and <name> are mandatory
+ * <id> is optional, if != ~0, will be used to append an id after the name
+ * in order to differentiate 2 entries set using the same <type> and <name>
+ *
+ * The function does nothing if naming API is not available, and naming errors
+ * are ignored.
+ */
+void vma_set_name_id(void *addr, size_t size, const char *type, const char *name, unsigned int id)
+{
+	long pagesize = sysconf(_SC_PAGESIZE);
+	void *aligned_addr;
+	__maybe_unused size_t aligned_size;
+
+	BUG_ON(!type || !name);
+
+	/* prctl/PR_SET/VMA expects the start of an aligned memory address, but
+	 * user may have provided address returned by malloc() which may not be
+	 * aligned nor point to the beginning of the map
+	 */
+	aligned_addr = (void *)((uintptr_t)addr & -4096);
+	aligned_size = (((addr +  size) - aligned_addr) + 4095) & -4096;
+
+	if (aligned_addr != addr) {
+		/* provided pointer likely comes from malloc(), at least it
+		 * doesn't come from mmap() which only returns aligned addresses
+		 */
+		if (size < pagesize)
+			return;
+	}
+#if defined(USE_PRCTL) && defined(PR_SET_VMA)
+	{
+		/*
+		 * From Linux 5.17 (and if the `CONFIG_ANON_VMA_NAME` kernel config is set)`,
+		 * anonymous regions can be named.
+		 * We intentionally ignore errors as it should not jeopardize the memory context
+		 * mapping whatsoever (e.g. older kernels).
+		 *
+		 * The naming can take up to 79 characters, accepting valid ASCII values
+		 * except [, ], \, $ and '.
+		 * As a result, when looking for /proc/<pid>/maps, we can see the anonymous range
+		 * as follow :
+		 * `7364c4fff000-736508000000 rw-s 00000000 00:01 3540  [anon_shmem:scope:name{-id}]`
+		 * (MAP_SHARED)
+		 * `7364c4fff000-736508000000 rw-s 00000000 00:01 3540  [anon:scope:name{-id}]`
+		 * (MAP_PRIVATE)
+		 */
+		char fullname[80];
+		int rn;
+
+		if (id != ~0)
+			rn = snprintf(fullname, sizeof(fullname), "%s:%s-%u", type, name, id);
+		else
+			rn = snprintf(fullname, sizeof(fullname), "%s:%s", type, name);
+
+		if (rn >= 0) {
+			/* Give a name to the map by setting PR_SET_VMA_ANON_NAME attribute
+			 * using prctl/PR_SET_VMA combination.
+			 *
+			 * note from 'man prctl':
+			 *   assigning an attribute to a virtual memory area might prevent it
+			 *   from being merged with adjacent virtual memory areas due to the
+			 *   difference in that attribute's value.
+			 */
+			(void)prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME,
+			            aligned_addr, aligned_size, fullname);
+		}
+	}
+#endif
+}
+
+/* wrapper for vma_set_name_id() but without id */
+void vma_set_name(void *addr, size_t size, const char *type, const char *name)
+{
+	vma_set_name_id(addr, size, type, name, ~0);
+}
+
 #if defined(RTLD_DEFAULT) || defined(RTLD_NEXT)
 /* redefine dlopen() so that we can detect unexpected replacement of some
  * critical symbols, typically init/alloc/free functions coming from alternate
@@ -6333,7 +6684,7 @@ void *dlopen(const char *filename, int flags)
 static int init_tools_per_thread()
 {
 	/* Let's make each thread start from a different position */
-	statistical_prng_state += tid * MAX_THREADS;
+	statistical_prng_state += ha_random32();
 	if (!statistical_prng_state)
 		statistical_prng_state++;
 	return 1;

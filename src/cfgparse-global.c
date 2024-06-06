@@ -36,8 +36,7 @@ static const char *common_kw_list[] = {
 	"insecure-fork-wanted", "insecure-setuid-wanted", "nosplice",
 	"nogetaddrinfo", "noreuseport", "quiet", "zero-warning",
 	"tune.runqueue-depth", "tune.maxpollevents", "tune.maxaccept",
-	"tune.recv_enough", "tune.buffers.limit",
-	"tune.buffers.reserve", "tune.bufsize", "tune.maxrewrite",
+	"tune.recv_enough", "tune.bufsize", "tune.maxrewrite",
 	"tune.idletimer", "tune.rcvbuf.client", "tune.rcvbuf.server",
 	"tune.sndbuf.client", "tune.sndbuf.server", "tune.pipesize",
 	"tune.http.cookielen", "tune.http.logurilen", "tune.http.maxhdr",
@@ -52,6 +51,7 @@ static const char *common_kw_list[] = {
 	"presetenv", "unsetenv", "resetenv", "strict-limits", "localpeer",
 	"numa-cpu-mapping", "defaults", "listen", "frontend", "backend",
 	"peers", "resolvers", "cluster-secret", "no-quic", "limited-quic",
+	"stats-file",
 	NULL /* must be last */
 };
 
@@ -74,6 +74,9 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		/* no option, nothing special to do */
 		alertif_too_many_args(0, file, linenum, args, &err_code);
 		goto out;
+	}
+	else if (strcmp(args[0], "expose-deprecated-directives") == 0) {
+		deprecated_directives_allowed = 1;
 	}
 	else if (strcmp(args[0], "expose-experimental-directives") == 0) {
 		experimental_directives_allowed = 1;
@@ -262,36 +265,6 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 		global.tune.recv_enough = atol(args[1]);
-	}
-	else if (strcmp(args[0], "tune.buffers.limit") == 0) {
-		if (alertif_too_many_args(1, file, linenum, args, &err_code))
-			goto out;
-		if (*(args[1]) == 0) {
-			ha_alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
-			err_code |= ERR_ALERT | ERR_FATAL;
-			goto out;
-		}
-		global.tune.buf_limit = atol(args[1]);
-		if (global.tune.buf_limit) {
-			if (global.tune.buf_limit < 3)
-				global.tune.buf_limit = 3;
-			if (global.tune.buf_limit <= global.tune.reserved_bufs)
-				global.tune.buf_limit = global.tune.reserved_bufs + 1;
-		}
-	}
-	else if (strcmp(args[0], "tune.buffers.reserve") == 0) {
-		if (alertif_too_many_args(1, file, linenum, args, &err_code))
-			goto out;
-		if (*(args[1]) == 0) {
-			ha_alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
-			err_code |= ERR_ALERT | ERR_FATAL;
-			goto out;
-		}
-		global.tune.reserved_bufs = atol(args[1]);
-		if (global.tune.reserved_bufs < 2)
-			global.tune.reserved_bufs = 2;
-		if (global.tune.buf_limit && global.tune.buf_limit <= global.tune.reserved_bufs)
-			global.tune.buf_limit = global.tune.reserved_bufs + 1;
 	}
 	else if (strcmp(args[0], "tune.bufsize") == 0) {
 		if (alertif_too_many_args(1, file, linenum, args, &err_code))
@@ -1028,6 +1001,21 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 
 		global.server_state_file = strdup(args[1]);
 	}
+	else if (strcmp(args[0], "stats-file") == 0) { /* path to the file where HAProxy can load the server states */
+		if (global.stats_file != NULL) {
+			ha_alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT;
+			goto out;
+		}
+
+		if (!*(args[1])) {
+			ha_alert("parsing [%s:%d] : '%s' expect one argument: a file path.\n", file, linenum, args[0]);
+			err_code |= ERR_FATAL;
+			goto out;
+		}
+
+		global.stats_file = strdup(args[1]);
+	}
 	else if (strcmp(args[0], "log-tag") == 0) {  /* tag to report to syslog */
 		if (alertif_too_many_args(1, file, linenum, args, &err_code))
 			goto out;
@@ -1388,8 +1376,59 @@ static int cfg_parse_prealloc_fd(char **args, int section_type, struct proxy *cu
 	return 0;
 }
 
+/* Parser for harden.reject-privileged-ports.{tcp|quic}. */
+static int cfg_parse_reject_privileged_ports(char **args, int section_type,
+                                             struct proxy *curpx,
+                                             const struct proxy *defpx,
+                                             const char *file, int line, char **err)
+{
+	struct ist proto;
+	char onoff;
+
+	if (!*(args[1])) {
+		memprintf(err, "'%s' expects either 'on' or 'off'.", args[0]);
+		return -1;
+	}
+
+	proto = ist(args[0]);
+	while (istlen(istfind(proto, '.')))
+		proto = istadv(istfind(proto, '.'), 1);
+
+	if (strcmp(args[1], "on") == 0) {
+		onoff = 1;
+	}
+	else if (strcmp(args[1], "off") == 0) {
+		onoff = 0;
+	}
+	else {
+		memprintf(err, "'%s' expects either 'on' or 'off'.", args[0]);
+		return -1;
+	}
+
+	if (istmatch(proto, ist("tcp"))) {
+		if (!onoff)
+			global.clt_privileged_ports |= HA_PROTO_TCP;
+		else
+			global.clt_privileged_ports &= ~HA_PROTO_TCP;
+	}
+	else if (istmatch(proto, ist("quic"))) {
+		if (!onoff)
+			global.clt_privileged_ports |= HA_PROTO_QUIC;
+		else
+			global.clt_privileged_ports &= ~HA_PROTO_QUIC;
+	}
+	else {
+		memprintf(err, "invalid protocol for '%s'.", args[0]);
+		return -1;
+	}
+
+	return 0;
+}
+
 static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_GLOBAL, "prealloc-fd", cfg_parse_prealloc_fd },
+	{ CFG_GLOBAL, "harden.reject-privileged-ports.tcp",  cfg_parse_reject_privileged_ports },
+	{ CFG_GLOBAL, "harden.reject-privileged-ports.quic", cfg_parse_reject_privileged_ports },
 	{ 0, NULL, NULL },
 }};
 

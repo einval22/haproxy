@@ -26,6 +26,7 @@
 
 #include <haproxy/api.h>
 #include <haproxy/buf.h>
+#include <haproxy/sock.h>
 #include <haproxy/connection-t.h>
 #include <haproxy/stconn-t.h>
 #include <haproxy/fd.h>
@@ -52,7 +53,7 @@ extern struct mux_stopping_data mux_stopping_data[MAX_THREADS];
 /* receive a PROXY protocol header over a connection */
 int conn_recv_proxy(struct connection *conn, int flag);
 int conn_send_proxy(struct connection *conn, unsigned int flag);
-int make_proxy_line(char *buf, int buf_len, struct server *srv, struct connection *remote, struct stream *strm);
+int make_proxy_line(char *buf, int buf_len, struct server *srv, struct connection *remote, struct stream *strm, struct session *sess);
 struct conn_tlv_list *conn_get_tlv(struct connection *conn, int type);
 
 int conn_append_debug_info(struct buffer *buf, const struct connection *conn, const char *pfx);
@@ -88,6 +89,7 @@ void conn_delete_from_tree(struct connection *conn);
 void conn_init(struct connection *conn, void *target);
 struct connection *conn_new(void *target);
 void conn_free(struct connection *conn);
+void conn_release(struct connection *conn);
 struct conn_hash_node *conn_alloc_hash_node(struct connection *conn);
 struct sockaddr_storage *sockaddr_alloc(struct sockaddr_storage **sap, const struct sockaddr_storage *orig, socklen_t len);
 void sockaddr_free(struct sockaddr_storage **sap);
@@ -95,13 +97,7 @@ void sockaddr_free(struct sockaddr_storage **sap);
 
 /* connection hash stuff */
 uint64_t conn_calculate_hash(const struct conn_hash_params *params);
-uint64_t conn_hash_prehash(char *buf, size_t size);
-void conn_hash_update(char *buf, size_t *idx,
-                      const void *data, size_t size,
-                      enum conn_hash_params_t *flags,
-                      enum conn_hash_params_t type);
-uint64_t conn_hash_digest(char *buf, size_t bufsize,
-                          enum conn_hash_params_t flags);
+uint64_t conn_hash_prehash(const char *buf, size_t size);
 
 int conn_reverse(struct connection *conn);
 
@@ -426,19 +422,7 @@ static inline void conn_set_tos(const struct connection *conn, int tos)
 	if (!conn || !conn_ctrl_ready(conn) || (conn->flags & CO_FL_FDLESS))
 		return;
 
-#ifdef IP_TOS
-	if (conn->src->ss_family == AF_INET)
-		setsockopt(conn->handle.fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
-#endif
-#ifdef IPV6_TCLASS
-	if (conn->src->ss_family == AF_INET6) {
-		if (IN6_IS_ADDR_V4MAPPED(&((struct sockaddr_in6 *)conn->src)->sin6_addr))
-			/* v4-mapped addresses need IP_TOS */
-			setsockopt(conn->handle.fd, IPPROTO_IP, IP_TOS, &tos, sizeof(tos));
-		else
-			setsockopt(conn->handle.fd, IPPROTO_IPV6, IPV6_TCLASS, &tos, sizeof(tos));
-	}
-#endif
+	sock_set_tos(conn->handle.fd, conn->src, tos);
 }
 
 /* Sets the netfilter mark on the connection's socket. The connection is tested
@@ -449,13 +433,7 @@ static inline void conn_set_mark(const struct connection *conn, int mark)
 	if (!conn || !conn_ctrl_ready(conn) || (conn->flags & CO_FL_FDLESS))
 		return;
 
-#if defined(SO_MARK)
-	setsockopt(conn->handle.fd, SOL_SOCKET, SO_MARK, &mark, sizeof(mark));
-#elif defined(SO_USER_COOKIE)
-	setsockopt(conn->handle.fd, SOL_SOCKET, SO_USER_COOKIE, &mark, sizeof(mark));
-#elif defined(SO_RTABLE)
-	setsockopt(conn->handle.fd, SOL_SOCKET, SO_RTABLE, &mark, sizeof(mark));
-#endif
+	sock_set_mark(conn->handle.fd, conn->ctrl->fam->sock_family, mark);
 }
 
 /* Sets adjust the TCP quick-ack feature on the connection's socket. The

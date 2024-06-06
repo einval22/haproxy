@@ -22,6 +22,8 @@
 #ifndef _HAPROXY_TOOLS_T_H
 #define _HAPROXY_TOOLS_T_H
 
+#include <netinet/in.h>
+
 /* size used for max length of decimal representation of long long int. */
 #define NB_LLMAX_STR (sizeof("-9223372036854775807")-1)
 
@@ -161,6 +163,22 @@ struct net_addr {
 struct net_addr_type {
 	int proto_type; // socket layer
 	int xprt_type;  // transport layer
+};
+
+/* To easily pass context to cbor encode functions
+ */
+struct cbor_encode_ctx {
+	/* function pointer that cbor encode functions will use to encode a
+	 * single byte.
+	 *
+	 * The function needs to return the position of the last written byte
+	 * on success and NULL on failure. The function cannot write past <stop>
+	 */
+	char *(*e_fct_byte)(struct cbor_encode_ctx *ctx,
+	                    char *start, char *stop, uint8_t byte);
+
+	/* to provide some user-context to the encode_fct_* funcs */
+	void *e_fct_ctx;
 };
 
 #endif /* _HAPROXY_TOOLS_T_H */

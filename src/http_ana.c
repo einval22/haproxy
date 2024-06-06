@@ -35,6 +35,7 @@
 #include <haproxy/sc_strm.h>
 #include <haproxy/server-t.h>
 #include <haproxy/stats.h>
+#include <haproxy/stats-html.h>
 #include <haproxy/stconn.h>
 #include <haproxy/stream.h>
 #include <haproxy/trace.h>
@@ -328,7 +329,8 @@ int http_wait_for_request(struct stream *s, struct channel *req, int an_bit)
 
  return_int_err:
 	txn->status = 500;
-	s->flags |= SF_ERR_INTERNAL;
+	if (!(s->flags & SF_ERR_MASK))
+		s->flags |= SF_ERR_INTERNAL;
 	_HA_ATOMIC_INC(&sess->fe->fe_counters.internal_errors);
 	if (sess->listener && sess->listener->counters)
 		_HA_ATOMIC_INC(&sess->listener->counters->internal_errors);
@@ -584,7 +586,8 @@ int http_process_req_common(struct stream *s, struct channel *req, int an_bit, s
 
  return_int_err:
 	txn->status = 500;
-	s->flags |= SF_ERR_INTERNAL;
+	if (!(s->flags & SF_ERR_MASK))
+		s->flags |= SF_ERR_INTERNAL;
 	_HA_ATOMIC_INC(&sess->fe->fe_counters.internal_errors);
 	if (s->flags & SF_BE_ASSIGNED)
 		_HA_ATOMIC_INC(&s->be->be_counters.internal_errors);
@@ -657,7 +660,7 @@ int http_process_request(struct stream *s, struct channel *req, int an_bit)
 	 * A unique ID is generated even when it is not sent to ensure that the ID can make use of
 	 * fetches only available in the HTTP request processing stage.
 	 */
-	if (!LIST_ISEMPTY(&sess->fe->format_unique_id)) {
+	if (!lf_expr_isempty(&sess->fe->format_unique_id)) {
 		struct ist unique_id = stream_generate_unique_id(s, &sess->fe->format_unique_id);
 
 		if (!isttest(unique_id)) {
@@ -734,7 +737,8 @@ int http_process_request(struct stream *s, struct channel *req, int an_bit)
 
  return_int_err:
 	txn->status = 500;
-	s->flags |= SF_ERR_INTERNAL;
+	if (!(s->flags & SF_ERR_MASK))
+		s->flags |= SF_ERR_INTERNAL;
 	_HA_ATOMIC_INC(&sess->fe->fe_counters.internal_errors);
 	if (s->flags & SF_BE_ASSIGNED)
 		_HA_ATOMIC_INC(&s->be->be_counters.internal_errors);
@@ -836,7 +840,8 @@ int http_wait_for_request_body(struct stream *s, struct channel *req, int an_bit
 
  return_int_err:
 	txn->status = 500;
-	s->flags |= SF_ERR_INTERNAL;
+	if (!(s->flags & SF_ERR_MASK))
+		s->flags |= SF_ERR_INTERNAL;
 	_HA_ATOMIC_INC(&sess->fe->fe_counters.internal_errors);
 	if (s->flags & SF_BE_ASSIGNED)
 		_HA_ATOMIC_INC(&s->be->be_counters.internal_errors);
@@ -1084,7 +1089,8 @@ int http_request_forward_body(struct stream *s, struct channel *req, int an_bit)
 	goto return_prx_cond;
 
   return_int_err:
-	s->flags |= SF_ERR_INTERNAL;
+	if (!(s->flags & SF_ERR_MASK))
+		s->flags |= SF_ERR_INTERNAL;
 	_HA_ATOMIC_INC(&sess->fe->fe_counters.internal_errors);
 	_HA_ATOMIC_INC(&s->be->be_counters.internal_errors);
 	if (sess->listener && sess->listener->counters)
@@ -1241,7 +1247,7 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 				return 0;
 			}
 
-			if (txn->flags & TX_NOT_FIRST)
+			if (s->flags & SF_SRV_REUSED)
 				goto abort_keep_alive;
 
 			_HA_ATOMIC_INC(&s->be->be_counters.failed_resp);
@@ -1335,7 +1341,7 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 				}
 			}
 
-			if (txn->flags & TX_NOT_FIRST)
+			if (s->flags & SF_SRV_REUSED)
 				goto abort_keep_alive;
 
 			_HA_ATOMIC_INC(&s->be->be_counters.failed_resp);
@@ -1360,7 +1366,7 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 
 		/* 5: write error to client (we don't send any message then) */
 		else if (sc_ep_test(s->scf, SE_FL_ERR_PENDING)) {
-			if (txn->flags & TX_NOT_FIRST)
+			if (s->flags & SF_SRV_REUSED)
 				goto abort_keep_alive;
 
 			_HA_ATOMIC_INC(&s->be->be_counters.failed_resp);
@@ -1557,11 +1563,17 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 		txn->flags |= TX_CON_WANT_TUN;
 	}
 
-	/* check for NTML authentication headers in 401 (WWW-Authenticate) and
-	 * 407 (Proxy-Authenticate) responses and set the connection to private
+	/* Check for NTML authentication headers in 401 (WWW-Authenticate) and
+	 * 407 (Proxy-Authenticate) responses and set the connection to
+	 * private.
+	 *
+	 * Note that this is not performed when using a true multiplexer unless
+	 * connection is already attached to the session as nothing prevents it
+	 * from being shared already by several sessions here.
 	 */
 	srv_conn = sc_conn(s->scb);
-	if (srv_conn) {
+	if (srv_conn &&
+	    (LIST_INLIST(&srv_conn->sess_el) || strcmp(srv_conn->mux->name, "H1") == 0)) {
 		struct ist hdr;
 		struct http_hdr_ctx ctx;
 
@@ -1611,7 +1623,8 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 	if (objt_server(s->target))
 		_HA_ATOMIC_INC(&__objt_server(s->target)->counters.internal_errors);
 	txn->status = 500;
-	s->flags |= SF_ERR_INTERNAL;
+	if (!(s->flags & SF_ERR_MASK))
+		s->flags |= SF_ERR_INTERNAL;
 	goto return_prx_cond;
 
   return_bad_res:
@@ -1894,7 +1907,7 @@ int http_process_res_common(struct stream *s, struct channel *rep, int an_bit, s
 	 * bytes from the server, then this is the right moment. We have
 	 * to temporarily assign bytes_out to log what we currently have.
 	 */
-	if (!LIST_ISEMPTY(&sess->fe->logformat) && !(s->logs.logwait & LW_BYTES)) {
+	if (!lf_expr_isempty(&sess->fe->logformat) && !(s->logs.logwait & LW_BYTES)) {
 		s->logs.t_close = s->logs.t_data; /* to get a valid end date */
 		s->logs.bytes_out = htx->data;
 		s->do_log(s);
@@ -1930,7 +1943,8 @@ int http_process_res_common(struct stream *s, struct channel *rep, int an_bit, s
 
  return_int_err:
 	txn->status = 500;
-	s->flags |= SF_ERR_INTERNAL;
+	if (!(s->flags & SF_ERR_MASK))
+		s->flags |= SF_ERR_INTERNAL;
 	_HA_ATOMIC_INC(&sess->fe->fe_counters.internal_errors);
 	_HA_ATOMIC_INC(&s->be->be_counters.internal_errors);
 	if (sess->listener && sess->listener->counters)
@@ -2198,7 +2212,8 @@ int http_response_forward_body(struct stream *s, struct channel *res, int an_bit
 		_HA_ATOMIC_INC(&sess->listener->counters->internal_errors);
 	if (objt_server(s->target))
 		_HA_ATOMIC_INC(&__objt_server(s->target)->counters.internal_errors);
-	s->flags |= SF_ERR_INTERNAL;
+	if (!(s->flags & SF_ERR_MASK))
+		s->flags |= SF_ERR_INTERNAL;
 	goto return_error;
 
   return_bad_res:
@@ -2236,7 +2251,7 @@ int http_apply_redirect_rule(struct redirect_rule *rule, struct stream *s, struc
 	struct buffer *chunk;
 	struct ist status, reason, location;
 	unsigned int flags;
-	int ret = 1, close = 0; /* Try to keep the connection alive byt default */
+	int ret = 1;
 
 	chunk = alloc_trash_chunk();
 	if (!chunk) {
@@ -2409,9 +2424,6 @@ int http_apply_redirect_rule(struct redirect_rule *rule, struct stream *s, struc
 			break;
 	}
 
-	if (!(txn->req.flags & HTTP_MSGF_BODYLESS) && txn->req.msg_state != HTTP_MSG_DONE)
-		close = 1;
-
 	htx = htx_from_buf(&res->buf);
 	/* Trim any possible response */
 	channel_htx_truncate(&s->res, htx);
@@ -2421,9 +2433,6 @@ int http_apply_redirect_rule(struct redirect_rule *rule, struct stream *s, struc
 		goto fail;
 	sl->info.res.status = rule->code;
 	s->txn->status = rule->code;
-
-	if (close && !htx_add_header(htx, ist("Connection"), ist("close")))
-		goto fail;
 
 	if (!htx_add_header(htx, ist("Content-length"), ist("0")) ||
 	    !htx_add_header(htx, ist("Location"), location))
@@ -3877,9 +3886,9 @@ static int http_handle_stats(struct stream *s, struct channel *req, struct proxy
 	ctx->st_code = STAT_STATUS_INIT;
 	ctx->http_px = px;
 	ctx->flags |= uri_auth->flags;
-	ctx->flags |= STAT_FMT_HTML; /* assume HTML mode by default */
+	ctx->flags |= STAT_F_FMT_HTML; /* assume HTML mode by default */
 	if ((msg->flags & HTTP_MSGF_VER_11) && (txn->meth != HTTP_METH_HEAD))
-		ctx->flags |= STAT_CHUNKED;
+		ctx->flags |= STAT_F_CHUNKED;
 
 	htx = htxbuf(&req->buf);
 	sl = http_get_stline(htx);
@@ -3888,14 +3897,14 @@ static int http_handle_stats(struct stream *s, struct channel *req, struct proxy
 
 	for (h = lookup; h <= end - 3; h++) {
 		if (memcmp(h, ";up", 3) == 0) {
-			ctx->flags |= STAT_HIDE_DOWN;
+			ctx->flags |= STAT_F_HIDE_DOWN;
 			break;
 		}
 	}
 
 	for (h = lookup; h <= end - 9; h++) {
 		if (memcmp(h, ";no-maint", 9) == 0) {
-			ctx->flags |= STAT_HIDE_MAINT;
+			ctx->flags |= STAT_F_HIDE_MAINT;
 			break;
 		}
 	}
@@ -3903,7 +3912,7 @@ static int http_handle_stats(struct stream *s, struct channel *req, struct proxy
 	if (uri_auth->refresh) {
 		for (h = lookup; h <= end - 10; h++) {
 			if (memcmp(h, ";norefresh", 10) == 0) {
-				ctx->flags |= STAT_NO_REFRESH;
+				ctx->flags |= STAT_F_NO_REFRESH;
 				break;
 			}
 		}
@@ -3911,31 +3920,31 @@ static int http_handle_stats(struct stream *s, struct channel *req, struct proxy
 
 	for (h = lookup; h <= end - 4; h++) {
 		if (memcmp(h, ";csv", 4) == 0) {
-			ctx->flags &= ~(STAT_FMT_MASK|STAT_JSON_SCHM);
+			ctx->flags &= ~(STAT_F_FMT_MASK|STAT_F_JSON_SCHM);
 			break;
 		}
 	}
 
 	for (h = lookup; h <= end - 6; h++) {
 		if (memcmp(h, ";typed", 6) == 0) {
-			ctx->flags &= ~(STAT_FMT_MASK|STAT_JSON_SCHM);
-			ctx->flags |= STAT_FMT_TYPED;
+			ctx->flags &= ~(STAT_F_FMT_MASK|STAT_F_JSON_SCHM);
+			ctx->flags |= STAT_F_FMT_TYPED;
 			break;
 		}
 	}
 
 	for (h = lookup; h <= end - 5; h++) {
 		if (memcmp(h, ";json", 5) == 0) {
-			ctx->flags &= ~(STAT_FMT_MASK|STAT_JSON_SCHM);
-			ctx->flags |= STAT_FMT_JSON;
+			ctx->flags &= ~(STAT_F_FMT_MASK|STAT_F_JSON_SCHM);
+			ctx->flags |= STAT_F_FMT_JSON;
 			break;
 		}
 	}
 
 	for (h = lookup; h <= end - 12; h++) {
 		if (memcmp(h, ";json-schema", 12) == 0) {
-			ctx->flags &= ~STAT_FMT_MASK;
-			ctx->flags |= STAT_JSON_SCHM;
+			ctx->flags &= ~STAT_F_FMT_MASK;
+			ctx->flags |= STAT_F_JSON_SCHM;
 			break;
 		}
 	}
@@ -4004,7 +4013,7 @@ static int http_handle_stats(struct stream *s, struct channel *req, struct proxy
 
 		if (ret) {
 			/* no rule, or the rule matches */
-			ctx->flags |= STAT_ADMIN;
+			ctx->flags |= STAT_F_ADMIN;
 			break;
 		}
 	}
@@ -4012,21 +4021,21 @@ static int http_handle_stats(struct stream *s, struct channel *req, struct proxy
 	if (txn->meth == HTTP_METH_GET || txn->meth == HTTP_METH_HEAD)
 		appctx->st0 = STAT_HTTP_HEAD;
 	else if (txn->meth == HTTP_METH_POST) {
-		if (ctx->flags & STAT_ADMIN) {
+		if (ctx->flags & STAT_F_ADMIN) {
 			appctx->st0 = STAT_HTTP_POST;
 			if (msg->msg_state < HTTP_MSG_DATA)
 				req->analysers |= AN_REQ_HTTP_BODY;
 		}
 		else {
 			/* POST without admin level */
-			ctx->flags &= ~STAT_CHUNKED;
+			ctx->flags &= ~STAT_F_CHUNKED;
 			ctx->st_code = STAT_STATUS_DENY;
 			appctx->st0 = STAT_HTTP_LAST;
 		}
 	}
 	else {
 		/* Unsupported method */
-		ctx->flags &= ~STAT_CHUNKED;
+		ctx->flags &= ~STAT_F_CHUNKED;
 		ctx->st_code = STAT_STATUS_IVAL;
 		appctx->st0 = STAT_HTTP_LAST;
 	}
@@ -4191,7 +4200,6 @@ void http_perform_server_redirect(struct stream *s, struct stconn *sc)
 	s->txn->status = 302;
 
         if (!htx_add_header(htx, ist("Cache-Control"), ist("no-cache")) ||
-	    !htx_add_header(htx, ist("Connection"), ist("close")) ||
 	    !htx_add_header(htx, ist("Content-length"), ist("0")) ||
 	    !htx_add_header(htx, ist("Location"), location))
 		goto fail;
@@ -4473,7 +4481,8 @@ int http_forward_proxy_resp(struct stream *s, int final)
 	size_t data;
 
 	if (final) {
-		htx->flags |= HTX_FL_PROXY_RESP;
+		if (s->txn->server_status == -1)
+			s->txn->server_status = 0;
 
 		if (!htx_is_empty(htx) && !http_eval_after_res_rules(s))
 			return 0;

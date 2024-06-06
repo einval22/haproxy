@@ -28,6 +28,7 @@
 #include <import/ebtree-t.h>
 
 #include <haproxy/api-t.h>
+#include <haproxy/guid-t.h>
 #include <haproxy/obj_type-t.h>
 #include <haproxy/quic_cc-t.h>
 #include <haproxy/quic_sock-t.h>
@@ -138,7 +139,6 @@ struct ssl_bind_conf {
 	unsigned int verify:3;     /* verify method (set of SSL_VERIFY_* flags) */
 	unsigned int no_ca_names:1;/* do not send ca names to clients (ca_file related) */
 	unsigned int early_data:1; /* early data allowed */
-	unsigned int ocsp_update:2;/* enable OCSP auto update */
 	char *ca_file;             /* CAfile to use on verify and ca-names */
 	char *ca_verify_file;      /* CAverify file to use on verify only */
 	char *crl_file;            /* CRLfile to use on verify */
@@ -207,6 +207,8 @@ struct bind_conf {
 	char *arg;                 /* argument passed to "bind" for better error reporting */
 	char *file;                /* file where the section appears */
 	int line;                  /* line where the section appears */
+	char *guid_prefix;         /* prefix for listeners GUID */
+	size_t guid_idx;           /* next index for listeners GUID generation */
 	char *rhttp_srvname;       /* name of server when using "rhttp@" address */
 	int rhttp_nbconn;          /* count of connections to initiate in parallel */
 	__decl_thread(HA_RWLOCK_T sni_lock); /* lock the SNI trees during add/del operations */
@@ -251,6 +253,8 @@ struct listener {
 	struct {
 		struct eb32_node id;	/* place in the tree of used IDs */
 	} conf;				/* config information */
+
+	struct guid_node guid;		/* GUID global tree node */
 
 	struct li_per_thread *per_thr;  /* per-thread fields (one per thread in the group) */
 

@@ -36,6 +36,7 @@
 #include <haproxy/sample.h>
 #include <haproxy/sc_strm.h>
 #include <haproxy/stream.h>
+#include <haproxy/log.h>
 #include <haproxy/tools.h>
 #include <haproxy/version.h>
 
@@ -314,7 +315,7 @@ struct htx *smp_prefetch_htx(struct sample *smp, struct channel *chn, struct che
 		else {
 			if (txn->status == -1)
 				txn->status = sl->info.res.status;
-			if (!(htx->flags & HTX_FL_PROXY_RESP) && txn->server_status == -1)
+			if (txn->server_status == -1)
 				txn->server_status = sl->info.res.status;
 		}
 		if (sl->flags & HTX_SL_F_VER_11)
@@ -477,7 +478,7 @@ static int smp_fetch_uniqueid(const struct arg *args, struct sample *smp, const 
 {
 	struct ist unique_id;
 
-	if (LIST_ISEMPTY(&smp->sess->fe->format_unique_id))
+	if (lf_expr_isempty(&smp->sess->fe->format_unique_id))
 		return 0;
 
 	if (!smp->strm)

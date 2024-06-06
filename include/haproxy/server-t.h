@@ -31,7 +31,7 @@
 #include <haproxy/check-t.h>
 #include <haproxy/connection-t.h>
 #include <haproxy/counters-t.h>
-#include <haproxy/freq_ctr-t.h>
+#include <haproxy/guid-t.h>
 #include <haproxy/listener-t.h>
 #include <haproxy/obj_type-t.h>
 #include <haproxy/queue-t.h>
@@ -41,6 +41,7 @@
 #include <haproxy/task-t.h>
 #include <haproxy/thread-t.h>
 #include <haproxy/event_hdl-t.h>
+#include <haproxy/log-t.h>
 #include <haproxy/tools-t.h>
 
 
@@ -223,6 +224,13 @@ struct pid_list {
 	int exited;
 };
 
+/* srv methods of computing chash keys */
+enum srv_hash_key {
+	SRV_HASH_KEY_ID = 0,         /* derived from server puid */
+	SRV_HASH_KEY_ADDR,           /* derived from server address */
+	SRV_HASH_KEY_ADDR_PORT       /* derived from server address and port */
+};
+
 /* A tree occurrence is a descriptor of a place in a tree, with a pointer back
  * to the server itself.
  */
@@ -262,7 +270,7 @@ enum __attribute__((__packed__)) srv_ws_mode {
  */
 struct srv_pp_tlv_list {
 	struct list list;
-	struct list fmt;
+	struct lf_expr fmt;
 	char *fmt_string;
 	unsigned char type;
 };
@@ -293,6 +301,8 @@ struct server {
 	struct srv_per_tgroup *per_tgrp;        /* array of per-tgroup stuff such as idle conns */
 	unsigned int *curr_idle_thr;            /* Current number of orphan idling connections per thread */
 
+	char *pool_conn_name;
+	struct sample_expr *pool_conn_name_expr;
 	unsigned int pool_purge_delay;          /* Delay before starting to purge the idle conns pool */
 	unsigned int low_idle_conns;            /* min idle connection count to start picking from other threads */
 	unsigned int max_idle_conns;            /* Max number of connection allowed in the orphan connections list */
@@ -338,6 +348,7 @@ struct server {
 	unsigned int est_need_conns;            /* Estimate on the number of needed connections (max of curr and previous max_used) */
 
 	struct queue queue;			/* pending connections */
+	struct mt_list sess_conns;		/* list of private conns managed by a session on this server */
 
 	/* Element below are usd by LB algorithms and must be doable in
 	 * parallel to other threads reusing connections above.
@@ -356,7 +367,6 @@ struct server {
 	int cur_sess;				/* number of currently active sessions (including syn_sent) */
 	int served;				/* # of active sessions currently being served (ie not pending) */
 	int consecutive_errors;			/* current number of consecutive errors */
-	struct freq_ctr sess_per_sec;		/* sessions per second on this server */
 	struct be_counters counters;		/* statistics counters */
 
 	/* Below are some relatively stable settings, only changed under the lock */
@@ -366,12 +376,13 @@ struct server {
 	struct tree_occ *lb_nodes;              /* lb_nodes_tot * struct tree_occ */
 	unsigned lb_nodes_tot;                  /* number of allocated lb_nodes (C-HASH) */
 	unsigned lb_nodes_now;                  /* number of lb_nodes placed in the tree (C-HASH) */
+	enum srv_hash_key hash_key;             /* method to compute node hash (C-HASH) */
+	unsigned lb_server_key;                 /* hash of the values indicated by "hash_key" (C-HASH) */
 
 	const struct netns_entry *netns;        /* contains network namespace name or NULL. Network namespace comes from configuration */
 	struct xprt_ops *xprt;                  /* transport-layer operations */
 	unsigned int svc_port;                  /* the port to connect to (for relevant families) */
 	unsigned down_time;			/* total time the server was down */
-	time_t last_change;			/* last time, when the state was changed */
 
 	int puid;				/* proxy-unique server ID, used for SNMP, and "first" LB algo */
 	int tcp_ut;                             /* for TCP, user timeout */
@@ -454,6 +465,8 @@ struct server {
 	} tmpl_info;
 
 	event_hdl_sub_list e_subs;		/* event_hdl: server's subscribers list (atomically updated) */
+
+	struct guid_node guid;			/* GUID global tree node */
 
 	/* warning, these structs are huge, keep them at the bottom */
 	struct conn_src conn_src;               /* connection source settings */
@@ -629,7 +642,7 @@ struct server_inetaddr_updater {
 		struct {
 			unsigned int ns_id; // nameserver id responsible for the update
 		} dns_resolver;             // SERVER_INETADDR_UPDATER_DNS_RESOLVER specific infos
-	};                                  // per updater's additional ctx
+	} u;                                // per updater's additional ctx
 };
 #define SERVER_INETADDR_UPDATER_NONE                                           \
  (struct server_inetaddr_updater){ .by = SERVER_INETADDR_UPDATER_BY_NONE,      \
@@ -655,7 +668,7 @@ struct server_inetaddr_updater {
  (struct server_inetaddr_updater){                                             \
     .by = SERVER_INETADDR_UPDATER_BY_DNS_RESOLVER,                             \
     .dns = 1,                                                                  \
-    .dns_resolver.ns_id = _ns_id,                                              \
+    .u.dns_resolver.ns_id = _ns_id,                                            \
  }
 
 /* data provided to EVENT_HDL_SUB_SERVER_INETADDR handlers through

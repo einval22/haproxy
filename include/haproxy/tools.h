@@ -42,6 +42,7 @@
 #include <haproxy/api.h>
 #include <haproxy/chunk.h>
 #include <haproxy/intops.h>
+#include <haproxy/global.h>
 #include <haproxy/namespace-t.h>
 #include <haproxy/protocol-t.h>
 #include <haproxy/tools-t.h>
@@ -399,11 +400,11 @@ int addr_is_local(const struct netns_entry *ns,
  * <map> with the hexadecimal representation of their ASCII-code (2 digits)
  * prefixed by <escape>, and will store the result between <start> (included)
  * and <stop> (excluded), and will always terminate the string with a '\0'
- * before <stop>. The position of the '\0' is returned if the conversion
- * completes. If bytes are missing between <start> and <stop>, then the
- * conversion will be incomplete and truncated. If <stop> <= <start>, the '\0'
- * cannot even be stored so we return <start> without writing the 0.
+ * before <stop>. If bytes are missing between <start> and <stop>, then the
+ * conversion will be incomplete and truncated.
  * The input string must also be zero-terminated.
+ *
+ * Return the address of the \0 character, or NULL on error
  */
 extern const char hextab[];
 extern long query_encode_map[];
@@ -424,12 +425,32 @@ char *encode_chunk(char *start, char *stop,
  * is reached or NULL-byte is encountered. The result will
  * be stored between <start> (included) and <stop> (excluded). This
  * function will always try to terminate the resulting string with a '\0'
- * before <stop>, and will return its position if the conversion
- * completes.
+ * before <stop>.
+ *
+ * Return the address of the \0 character, or NULL on error
  */
 char *escape_string(char *start, char *stop,
 		    const char escape, const long *map,
 		    const char *string, const char *string_stop);
+
+/* Below are RFC8949 compliant cbor encode helper functions, see source
+ * file for functions descriptions
+ */
+char *cbor_encode_uint64_prefix(struct cbor_encode_ctx *ctx,
+                                char *start, char *stop,
+                                uint64_t value, uint8_t prefix);
+char *cbor_encode_int64(struct cbor_encode_ctx *ctx,
+                        char *start, char *stop, int64_t value);
+char *cbor_encode_bytes_prefix(struct cbor_encode_ctx *ctx,
+                               char *start, char *stop,
+                               const char *bytes, size_t len,
+                               uint8_t prefix);
+char *cbor_encode_bytes(struct cbor_encode_ctx *ctx,
+                        char *start, char *stop,
+                        const char *bytes, size_t len);
+char *cbor_encode_text(struct cbor_encode_ctx *ctx,
+                       char *start, char *stop,
+                       const char *text, size_t len);
 
 /* Check a string for using it in a CSV output format. If the string contains
  * one of the following four char <">, <,>, CR or LF, the string is
@@ -761,6 +782,21 @@ static inline int set_host_port(struct sockaddr_storage *addr, int port)
 	return 0;
 }
 
+/* Returns true if <addr> port is forbidden as client source using <proto>. */
+static inline int port_is_restricted(const struct sockaddr_storage *addr,
+                                     enum ha_proto proto)
+{
+	const uint16_t port = get_host_port(addr);
+
+	BUG_ON_HOT(proto != HA_PROTO_TCP && proto != HA_PROTO_QUIC);
+
+	/* RFC 6335 6. Port Number Ranges */
+	if (unlikely(port < 1024 && port > 0))
+		return !(global.clt_privileged_ports & proto);
+
+	return 0;
+}
+
 /* Convert mask from bit length form to in_addr form.
  * This function never fails.
  */
@@ -1006,6 +1042,8 @@ int dump_binary(struct buffer *out, const char *buf, int bsize);
 int dump_text_line(struct buffer *out, const char *buf, int bsize, int len,
                    int *line, int ptr);
 void dump_addr_and_bytes(struct buffer *buf, const char *pfx, const void *addr, int n);
+void dump_area_with_syms(struct buffer *output, const void *base, const void *addr,
+                         const void *special, const char *spec_type, const char *spec_name);
 void dump_hex(struct buffer *out, const char *pfx, const void *buf, int len, int unsafe);
 int may_access(const void *ptr);
 const void *resolve_sym_name(struct buffer *buf, const char *pfx, const void *addr);
@@ -1053,7 +1091,8 @@ static inline void *my_realloc2(void *ptr, size_t size)
 int parse_dotted_uints(const char *s, unsigned int **nums, size_t *sz);
 
 /* PRNG */
-void ha_generate_uuid(struct buffer *output);
+void ha_generate_uuid_v4(struct buffer *output);
+void ha_generate_uuid_v7(struct buffer *output);
 void ha_random_seed(const unsigned char *seed, size_t len);
 void ha_random_jump96(uint32_t dist);
 uint64_t ha_random64(void);
@@ -1175,5 +1214,9 @@ static inline void update_char_fingerprint(uint8_t *fp, char prev, char curr)
 int openssl_compare_current_version(const char *version);
 /* compare the current OpenSSL name to a string */
 int openssl_compare_current_name(const char *name);
+
+/* vma helpers */
+void vma_set_name(void *addr, size_t size, const char *type, const char *name);
+void vma_set_name_id(void *addr, size_t size, const char *type, const char *name, unsigned int id);
 
 #endif /* _HAPROXY_TOOLS_H */

@@ -60,7 +60,7 @@
 #include <assert.h>
 #endif
 #if defined(USE_SYSTEMD)
-#include <systemd/sd-daemon.h>
+#include <haproxy/systemd.h>
 #endif
 
 #include <import/sha1.h>
@@ -118,6 +118,7 @@
 #include <haproxy/sock.h>
 #include <haproxy/sock_inet.h>
 #include <haproxy/ssl_sock.h>
+#include <haproxy/stats-file.h>
 #include <haproxy/stats-t.h>
 #include <haproxy/stream.h>
 #include <haproxy/task.h>
@@ -198,6 +199,7 @@ struct global global = {
 		.quic_backend_max_idle_timeout = QUIC_TP_DFLT_BACK_MAX_IDLE_TIMEOUT,
 		.quic_frontend_max_idle_timeout = QUIC_TP_DFLT_FRONT_MAX_IDLE_TIMEOUT,
 		.quic_frontend_max_streams_bidi = QUIC_TP_DFLT_FRONT_MAX_STREAMS_BIDI,
+		.quic_reorder_ratio = QUIC_DFLT_REORDER_RATIO,
 		.quic_retry_threshold = QUIC_DFLT_RETRY_THRESHOLD,
 		.quic_max_frame_loss = QUIC_DFLT_MAX_FRAME_LOSS,
 		.quic_streams_buf = 30,
@@ -208,6 +210,8 @@ struct global global = {
 	.maxsslconn = DEFAULT_MAXSSLCONN,
 #endif
 #endif
+	/* by default allow clients which use a privileged port for TCP only */
+	.clt_privileged_ports = HA_PROTO_TCP,
 	/* others NULL OK */
 };
 
@@ -266,6 +270,7 @@ unsigned int warned = 0;
 unsigned int tainted = 0;
 
 unsigned int experimental_directives_allowed = 0;
+unsigned int deprecated_directives_allowed = 0;
 
 int check_kw_experimental(struct cfg_keyword *kw, const char *file, int linenum,
                           char **errmsg)
@@ -563,9 +568,6 @@ static void display_build_opts()
 #ifdef BUILD_TARGET
 	       "\n  TARGET  = " BUILD_TARGET
 #endif
-#ifdef BUILD_CPU
-	       "\n  CPU     = " BUILD_CPU
-#endif
 #ifdef BUILD_CC
 	       "\n  CC      = " BUILD_CC
 #endif
@@ -658,6 +660,7 @@ static void usage(char *name)
 		"        -dW fails if any warning is emitted\n"
 		"        -dD diagnostic mode : warn about suspicious configuration statements\n"
 		"        -dF disable fast-forward\n"
+		"        -dI enable insecure fork\n"
 		"        -dZ disable zero-copy forwarding\n"
 		"        -sf/-st [pid ]* finishes/terminates old pids.\n"
 		"        -x <unix_socket> get listening sockets from a unix socket\n"
@@ -720,6 +723,7 @@ static void mworker_reexec(int hardreload)
 	char *msg = NULL;
 	struct rlimit limit;
 	struct mworker_proc *current_child = NULL;
+	int x_off = 0; /* disable -x by putting -x /dev/null */
 
 	mworker_block_signals();
 	setenv("HAPROXY_MWORKER_REEXEC", "1", 1);
@@ -767,6 +771,10 @@ static void mworker_reexec(int hardreload)
 	/* copy the program name */
 	next_argv[next_argc++] = old_argv[0];
 
+	/* we need to reintroduce /dev/null every time */
+	if (old_unixsocket && strcmp(old_unixsocket, "/dev/null") == 0)
+		x_off = 1;
+
 	/* insert the new options just after argv[0] in case we have a -- */
 
 	if (getenv("HAPROXY_MWORKER_WAIT_ONLY") == NULL) {
@@ -790,14 +798,19 @@ static void mworker_reexec(int hardreload)
 				msg = NULL;
 			}
 		}
-
-		if (current_child) {
+		if (!x_off && current_child) {
 			/* add the -x option with the socketpair of the current worker */
 			next_argv[next_argc++] = "-x";
 			if ((next_argv[next_argc++] = memprintf(&msg, "sockpair@%d", current_child->ipc_fd[0])) == NULL)
 				goto alloc_error;
 			msg = NULL;
 		}
+	}
+
+	if (x_off) {
+		/* if the cmdline contained a -x /dev/null, continue to use it */
+		next_argv[next_argc++] = "-x";
+		next_argv[next_argc++] = "/dev/null";
 	}
 
 	/* copy the previous options */
@@ -841,8 +854,17 @@ void mworker_reload(int hardreload)
 	}
 
 #if defined(USE_SYSTEMD)
-	if (global.tune.options & GTUNE_USE_SYSTEMD)
-		sd_notify(0, "RELOADING=1\nSTATUS=Reloading Configuration.\n");
+	if (global.tune.options & GTUNE_USE_SYSTEMD) {
+		struct timespec ts;
+
+		(void)clock_gettime(CLOCK_MONOTONIC, &ts);
+
+		sd_notifyf(0,
+		           "RELOADING=1\n"
+		               "STATUS=Reloading Configuration.\n"
+		               "MONOTONIC_USEC=%" PRIu64 "\n",
+		           (ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000ULL));
+	}
 #endif
 	mworker_reexec(hardreload);
 }
@@ -997,19 +1019,19 @@ static void sig_dump_state(struct sig_handler *sh)
 			chunk_printf(&trash,
 			             "SIGHUP: Proxy %s has no servers. Conn: act(FE+BE): %d+%d, %d pend (%d unass), tot(FE+BE): %lld+%lld.",
 			             p->id,
-			             p->feconn, p->beconn, p->totpend, p->queue.length, p->fe_counters.cum_conn, p->be_counters.cum_conn);
+			             p->feconn, p->beconn, p->totpend, p->queue.length, p->fe_counters.cum_conn, p->be_counters.cum_sess);
 		} else if (p->srv_act == 0) {
 			chunk_printf(&trash,
 			             "SIGHUP: Proxy %s %s ! Conn: act(FE+BE): %d+%d, %d pend (%d unass), tot(FE+BE): %lld+%lld.",
 			             p->id,
 			             (p->srv_bck) ? "is running on backup servers" : "has no server available",
-			             p->feconn, p->beconn, p->totpend, p->queue.length, p->fe_counters.cum_conn, p->be_counters.cum_conn);
+			             p->feconn, p->beconn, p->totpend, p->queue.length, p->fe_counters.cum_conn, p->be_counters.cum_sess);
 		} else {
 			chunk_printf(&trash,
 			             "SIGHUP: Proxy %s has %d active servers and %d backup servers available."
 			             " Conn: act(FE+BE): %d+%d, %d pend (%d unass), tot(FE+BE): %lld+%lld.",
 			             p->id, p->srv_act, p->srv_bck,
-			             p->feconn, p->beconn, p->totpend, p->queue.length, p->fe_counters.cum_conn, p->be_counters.cum_conn);
+			             p->feconn, p->beconn, p->totpend, p->queue.length, p->fe_counters.cum_conn, p->be_counters.cum_sess);
 		}
 		ha_warning("%s\n", trash.area);
 		send_log(p, LOG_NOTICE, "%s\n", trash.area);
@@ -1678,6 +1700,8 @@ static void init_args(int argc, char **argv)
 #endif
 			else if (*flag == 'd' && flag[1] == 'F')
 				global.tune.options &= ~GTUNE_USE_FAST_FWD;
+			else if (*flag == 'd' && flag[1] == 'I')
+				global.tune.options |= GTUNE_INSECURE_FORK;
 			else if (*flag == 'd' && flag[1] == 'V')
 				global.ssl_server_verify = SSL_SERVER_VERIFY_NONE;
 			else if (*flag == 'd' && flag[1] == 'Z')
@@ -2368,6 +2392,7 @@ static void init(int argc, char **argv)
 		}
 		list_for_each_entry(ppcf, &post_proxy_check_list, list)
 			err_code |= ppcf->fct(px);
+		px->flags |= PR_FL_CHECKED;
 	}
 	if (err_code & (ERR_ABORT|ERR_FATAL)) {
 		ha_alert("Fatal errors found in configuration.\n");
@@ -2397,6 +2422,9 @@ static void init(int argc, char **argv)
 	/* Apply server states */
 	apply_server_state();
 
+	/* Preload internal counters. */
+	apply_stats_file();
+
 	for (px = proxies_list; px; px = px->next)
 		srv_compute_all_admin_states(px);
 
@@ -2423,6 +2451,10 @@ static void init(int argc, char **argv)
 
 	if (global.mode & MODE_DUMP_KWD)
 		dump_registered_keywords();
+
+	if (global.mode & MODE_DIAG) {
+		cfg_run_diagnostics();
+	}
 
 	if (global.mode & MODE_CHECK) {
 		struct peers *pr;
@@ -2458,10 +2490,6 @@ static void init(int argc, char **argv)
 
 	if (global.mode & MODE_DUMP_CFG)
 		deinit_and_exit(0);
-
-	if (global.mode & MODE_DIAG) {
-		cfg_run_diagnostics();
-	}
 
 #ifdef USE_OPENSSL
 
@@ -2837,9 +2865,6 @@ static void init(int argc, char **argv)
 #ifdef BUILD_TARGET
 	chunk_appendf(&trash, "TARGET='%s'", BUILD_TARGET);
 #endif
-#ifdef BUILD_CPU
-	chunk_appendf(&trash, " CPU='%s'", BUILD_CPU);
-#endif
 #ifdef BUILD_OPTIONS
 	chunk_appendf(&trash, " %s", BUILD_OPTIONS);
 #endif
@@ -2979,6 +3004,7 @@ void deinit(void)
 	ha_free(&localpeer);
 	ha_free(&global.server_state_base);
 	ha_free(&global.server_state_file);
+	ha_free(&global.stats_file);
 	task_destroy(idle_conn_task);
 	idle_conn_task = NULL;
 
@@ -3108,7 +3134,7 @@ void run_poll_loop()
 			if (thread_has_tasks()) {
 				activity[tid].wake_tasks++;
 				_HA_ATOMIC_AND(&th_ctx->flags, ~TH_FL_SLEEPING);
-			} else if (signal_queue_len) {
+			} else if (signal_queue_len && tid == 0) {
 				/* this check is required after setting TH_FL_SLEEPING to avoid
 				 * a race with wakeup on signals using wake_threads() */
 				_HA_ATOMIC_AND(&th_ctx->flags, ~TH_FL_SLEEPING);
@@ -3189,6 +3215,18 @@ static void *run_thread_poll_loop(void *data)
 	ha_thread_info[tid].pth_id = ha_get_pthread_id(tid);
 #endif
 	ha_thread_info[tid].stack_top = __builtin_frame_address(0);
+
+	/* Assign the ring queue. Contrary to an intuitive thought, this does
+	 * not benefit from locality and it's counter-productive to group
+	 * threads from a same group or range number in the same queue. In some
+	 * sense it arranges us because it means we can use a modulo and ensure
+	 * that even small numbers of threads are well spread.
+	 */
+	ha_thread_info[tid].ring_queue =
+		(tid % MIN(global.nbthread,
+			   (global.tune.ring_queues ?
+			    global.tune.ring_queues :
+			    RING_DFLT_QUEUES))) % RING_WAIT_QUEUES;
 
 	/* thread is started, from now on it is not idle nor harmless */
 	thread_harmless_end();
@@ -3385,9 +3423,6 @@ int main(int argc, char **argv)
 #ifdef BUILD_TARGET
 		        "\n  TARGET  = " BUILD_TARGET
 #endif
-#ifdef BUILD_CPU
-		        "\n  CPU     = " BUILD_CPU
-#endif
 #ifdef BUILD_CC
 		        "\n  CC      = " BUILD_CC
 #endif
@@ -3489,18 +3524,6 @@ int main(int argc, char **argv)
 	if (global.rlimit_memmax) {
 		limit.rlim_cur = limit.rlim_max =
 			global.rlimit_memmax * 1048576ULL;
-#ifdef RLIMIT_AS
-		if (setrlimit(RLIMIT_AS, &limit) == -1) {
-			if (global.tune.options & GTUNE_STRICT_LIMITS) {
-				ha_alert("[%s.main()] Cannot fix MEM limit to %d megs.\n",
-					 argv[0], global.rlimit_memmax);
-				exit(1);
-			}
-			else
-				ha_warning("[%s.main()] Cannot fix MEM limit to %d megs.\n",
-					   argv[0], global.rlimit_memmax);
-		}
-#else
 		if (setrlimit(RLIMIT_DATA, &limit) == -1) {
 			if (global.tune.options & GTUNE_STRICT_LIMITS) {
 				ha_alert("[%s.main()] Cannot fix MEM limit to %d megs.\n",
@@ -3511,8 +3534,15 @@ int main(int argc, char **argv)
 				ha_warning("[%s.main()] Cannot fix MEM limit to %d megs.\n",
 					   argv[0], global.rlimit_memmax);
 		}
-#endif
 	}
+
+#if defined(USE_LINUX_CAP)
+	/* If CAP_NET_BIND_SERVICE is in binary file permitted set and process
+	 * is started and run under the same non-root user, this allows
+	 * binding to privileged ports.
+	 */
+	prepare_caps_from_permitted_set(geteuid(), global.uid, argv[0]);
+#endif
 
 	/* Try to get the listeners FD from the previous process using
 	 * _getsocks on the stat socket, it must never been done in wait mode
@@ -3615,21 +3645,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if ((global.last_checks & LSTCHK_NETADM) && global.uid) {
-		ha_alert("[%s.main()] Some configuration options require full privileges, so global.uid cannot be changed.\n"
-			 "", argv[0]);
-		protocol_unbind_all();
-		exit(1);
-	}
-
-	/* If the user is not root, we'll still let them try the configuration
-	 * but we inform them that unexpected behaviour may occur.
-	 */
-	if ((global.last_checks & LSTCHK_NETADM) && getuid())
-		ha_warning("[%s.main()] Some options which require full privileges"
-			   " might not work well.\n"
-			   "", argv[0]);
-
 	if ((global.mode & (MODE_MWORKER|MODE_DAEMON)) == 0) {
 
 		/* chroot if needed */
@@ -3657,6 +3672,34 @@ int main(int argc, char **argv)
 
 	if ((global.mode & (MODE_MWORKER | MODE_DAEMON)) == 0)
 		set_identity(argv[0]);
+
+	/* set_identity() above might have dropped LSTCHK_NETADM or/and
+	 * LSTCHK_SYSADM if it changed to a new UID while preserving enough
+	 * permissions to honnor LSTCHK_NETADM/LSTCHK_SYSADM.
+	 */
+	if ((global.last_checks & (LSTCHK_NETADM|LSTCHK_SYSADM)) && getuid()) {
+		/* If global.uid is present in config, it is already set as euid
+		 * and ruid by set_identity() just above, so it's better to
+		 * remind the user to fix uncoherent settings.
+		 */
+		if (global.uid) {
+			ha_alert("[%s.main()] Some configuration options require full "
+				 "privileges, so global.uid cannot be changed.\n", argv[0]);
+#if defined(USE_LINUX_CAP)
+			ha_alert("[%s.main()] Alternately, if your system supports "
+			         "Linux capabilities, you may also consider using "
+			         "'setcap cap_net_raw' or 'setcap cap_net_admin' in the "
+			         "'global' section.\n", argv[0]);
+#endif
+			protocol_unbind_all();
+			exit(1);
+		}
+		/* If the user is not root, we'll still let them try the configuration
+		 * but we inform them that unexpected behaviour may occur.
+		 */
+		ha_warning("[%s.main()] Some options which require full privileges"
+			   " might not work well.\n", argv[0]);
+	}
 
 	/* check ulimits */
 	limit.rlim_cur = limit.rlim_max = 0;

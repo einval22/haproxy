@@ -185,6 +185,14 @@ static void _do_poll(struct poller *p, int exp, int wake)
 	do {
 		int timeout = (global.tune.options & GTUNE_BUSY_POLLING) ? 0 : wait_time;
 		int interrupted = 0;
+		/* Note: normally we should probably expect to pass
+		 * global.tune.maxpollevents here so as to process multiple
+		 * events at once, but it appears unreliable in tests, even
+		 * starting with value 2, and it seems basically nobody's
+		 * using that anymore so it's probably not worth spending days
+		 * investigating this poller more to improve its performance,
+		 * let's switch back to 1. --WT
+		 */
 		nevlist = 1; /* desired number of events to be retrieved */
 		timeout_ts.tv_sec  = (timeout / 1000);
 		timeout_ts.tv_nsec = (timeout % 1000) * 1000000;
@@ -194,6 +202,12 @@ static void _do_poll(struct poller *p, int exp, int wake)
 				   evports_evlist_max,
 				   &nevlist, /* updated to the number of events retrieved */
 				   &timeout_ts);
+
+		/* Be careful, nevlist here is always updated by the syscall
+		 * even on status == -1, so it must always be respected
+		 * otherwise events are lost. Awkward API BTW, I wonder how
+		 * they thought ENOSYS ought to be handled... -WT
+		 */
 		if (status != 0) {
 			int e = errno;
 			switch (e) {
@@ -206,7 +220,7 @@ static void _do_poll(struct poller *p, int exp, int wake)
 				/* nevlist >= 0 */
 				break;
 			default:
-				nevlist = 0;
+				/* signal or anything else */
 				interrupted = 1;
 				break;
 			}

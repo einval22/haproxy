@@ -3,6 +3,7 @@
 #include <import/eb64tree.h>
 
 #include <haproxy/api.h>
+#include <haproxy/chunk.h>
 #include <haproxy/connection.h>
 #include <haproxy/dynbuf.h>
 #include <haproxy/h3.h>
@@ -99,10 +100,20 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 
 	qcs->stream = NULL;
 	qcs->qcc = qcc;
-	qcs->sd = NULL;
 	qcs->flags = QC_SF_NONE;
 	qcs->st = QC_SS_IDLE;
 	qcs->ctx = NULL;
+
+	qcs->sd = sedesc_new();
+	if (!qcs->sd)
+		goto err;
+	qcs->sd->se   = qcs;
+	qcs->sd->conn = qcc->conn;
+	se_fl_set(qcs->sd, SE_FL_T_MUX | SE_FL_ORPHAN | SE_FL_NOT_FIRST);
+	se_expect_no_data(qcs->sd);
+
+	if (!(global.tune.no_zero_copy_fwd & NO_ZERO_COPY_FWD_QUIC_SND))
+		se_fl_set(qcs->sd, SE_FL_MAY_FASTFWD_CONS);
 
 	/* App callback attach may register the stream for http-request wait.
 	 * These fields must be initialed before.
@@ -124,6 +135,9 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 	}
 	else if (quic_stream_is_local(qcc, id)) {
 		qfctl_init(&qcs->tx.fc, qcc->rfctl.msd_uni_l);
+	}
+	else {
+		qfctl_init(&qcs->tx.fc, 0);
 	}
 
 	qcs->rx.ncbuf = NCBUF_NULL;
@@ -428,7 +442,7 @@ static struct ncbuf *qcs_get_ncbuf(struct qcs *qcs, struct ncbuf *ncbuf)
 	struct buffer buf = BUF_NULL;
 
 	if (ncb_is_null(ncbuf)) {
-		if (!b_alloc(&buf))
+		if (!b_alloc(&buf, DB_MUX_RX))
 			return NULL;
 
 		*ncbuf = ncb_make(buf.area, buf.size, 0);
@@ -552,6 +566,28 @@ void qcc_set_error(struct qcc *qcc, int err, int app)
 	tasklet_wakeup(qcc->wait_event.tasklet);
 }
 
+/* Increment glitch counter for <qcc> connection by <inc> steps. If configured
+ * threshold reached, close the connection with an error code.
+ */
+int qcc_report_glitch(struct qcc *qcc, int inc)
+{
+	const int max = global.tune.quic_frontend_glitches_threshold;
+
+	qcc->glitches += inc;
+	if (max && qcc->glitches >= max && !(qcc->flags & QC_CF_ERRL)) {
+		if (qcc->app_ops->report_susp) {
+			qcc->app_ops->report_susp(qcc->ctx);
+			qcc_set_error(qcc, qcc->err.code, 1);
+		}
+		else {
+			qcc_set_error(qcc, QC_ERR_INTERNAL_ERROR, 0);
+		}
+		return 1;
+	}
+
+	return 0;
+}
+
 /* Open a locally initiated stream for the connection <qcc>. Set <bidi> for a
  * bidirectional stream, else an unidirectional stream is opened. The next
  * available ID on the connection will be used according to the stream type.
@@ -666,14 +702,6 @@ struct stconn *qcs_attach_sc(struct qcs *qcs, struct buffer *buf, char fin)
 	struct qcc *qcc = qcs->qcc;
 	struct session *sess = qcc->conn->owner;
 
-	qcs->sd = sedesc_new();
-	if (!qcs->sd)
-		return NULL;
-
-	qcs->sd->se   = qcs;
-	qcs->sd->conn = qcc->conn;
-	se_fl_set(qcs->sd, SE_FL_T_MUX | SE_FL_ORPHAN | SE_FL_NOT_FIRST);
-	se_expect_no_data(qcs->sd);
 
 	/* TODO duplicated from mux_h2 */
 	sess->t_idle = ns_to_ms(now_ns - sess->accept_ts) - sess->t_handshake;
@@ -949,7 +977,7 @@ static int qcc_decode_qcs(struct qcc *qcc, struct qcs *qcs)
  */
 struct buffer *qcc_get_stream_rxbuf(struct qcs *qcs)
 {
-	return b_alloc(&qcs->rx.app_buf);
+	return b_alloc(&qcs->rx.app_buf, DB_MUX_RX);
 }
 
 /* Allocate if needed and retrieve <qcs> stream buffer for data emission.
@@ -993,7 +1021,7 @@ struct buffer *qcc_get_stream_txbuf(struct qcs *qcs, int *err)
 			goto out;
 		}
 
-		if (!b_alloc(out)) {
+		if (!b_alloc(out, DB_MUX_TX)) {
 			TRACE_ERROR("buffer alloc failure", QMUX_EV_QCS_SEND, qcc->conn, qcs);
 			*err = 1;
 			goto out;
@@ -1100,7 +1128,7 @@ void qcc_reset_stream(struct qcs *qcs, int err)
 		/* Soft offset cannot be inferior to real one. */
 		BUG_ON(qcc->tx.fc.off_soft - diff < qcc->tx.fc.off_real);
 
-		/* Substract to conn flow control data amount prepared on stream not yet sent. */
+		/* Subtract to conn flow control data amount prepared on stream not yet sent. */
 		qcc->tx.fc.off_soft -= diff;
 		if (soft_blocked && !qfctl_sblocked(&qcc->tx.fc))
 			qcc_notify_fctl(qcc);
@@ -1578,12 +1606,16 @@ int qcc_recv_stop_sending(struct qcc *qcc, uint64_t id, uint64_t err)
 		}
 	}
 
-	/* If FIN already reached, future RESET_STREAMS will be ignored.
-	 * Manually set EOS in this case.
-	 */
+	/* Manually set EOS if FIN already reached as futures RESET_STREAM will be ignored in this case. */
 	if (qcs_sc(qcs) && se_fl_test(qcs->sd, SE_FL_EOI)) {
 		se_fl_set(qcs->sd, SE_FL_EOS);
 		qcs_alert(qcs);
+	}
+
+	/* If not defined yet, set abort info for the sedesc */
+	if (!qcs->sd->abort_info.info) {
+		qcs->sd->abort_info.info = (SE_ABRT_SRC_MUX_QUIC << SE_ABRT_SRC_SHIFT);
+		qcs->sd->abort_info.code = err;
 	}
 
 	/* RFC 9000 3.5. Solicited State Transitions
@@ -1668,12 +1700,12 @@ static void qcs_destroy(struct qcs *qcs)
 
 	TRACE_ENTER(QMUX_EV_QCS_END, conn, qcs);
 
-	/* MUST not removed a stream with sending prepared data left. This is
-	 * to ensure consistency on connection flow-control calculation.
-	 */
-	BUG_ON(qcs->tx.fc.off_soft != qcs->tx.fc.off_real);
+	if (!(qcc->flags & (QC_CF_ERR_CONN|QC_CF_ERRL))) {
+		/* MUST not removed a stream with sending prepared data left. This is
+		 * to ensure consistency on connection flow-control calculation.
+		 */
+		BUG_ON(qcs->tx.fc.off_soft != qcs->tx.fc.off_real);
 
-	if (!(qcc->flags & QC_CF_ERRL)) {
 		if (quic_stream_is_remote(qcc, id))
 			qcc_release_remote_stream(qcc, id);
 	}
@@ -2003,7 +2035,7 @@ static int qcs_send_stop_sending(struct qcs *qcs)
 }
 
 /* Used internally by qcc_io_send function. Proceed to send for <qcs>. A STREAM
- * frame is generated poiting to QCS stream descriptor content and inserted in
+ * frame is generated pointing to QCS stream descriptor content and inserted in
  * <frms> list. Frame length will be truncated if greater than <window_conn>.
  * This allows to prepare several frames in a loop while respecting connection
  * flow control window.
@@ -2108,7 +2140,7 @@ static int qcc_io_send(struct qcc *qcc)
 
 		/* Stream must not be present in send_list if it has nothing to send. */
 		BUG_ON(!(qcs->flags & (QC_SF_FIN_STREAM|QC_SF_TO_STOP_SENDING|QC_SF_TO_RESET)) &&
-		       !qcs_prep_bytes(qcs));
+		       (!qcs->stream || !qcs_prep_bytes(qcs)));
 
 		/* Each STOP_SENDING/RESET_STREAM frame is sent individually to
 		 * guarantee its emission.
@@ -2123,7 +2155,7 @@ static int qcc_io_send(struct qcc *qcc)
 			 * to send.
 			 */
 			if (!(qcs->flags & (QC_SF_FIN_STREAM|QC_SF_TO_RESET)) &&
-			    !qcs_prep_bytes(qcs)) {
+			    (!qcs->stream || !qcs_prep_bytes(qcs))) {
 				LIST_DEL_INIT(&qcs->el_send);
 				continue;
 			}
@@ -2339,7 +2371,7 @@ static void qcc_shutdown(struct qcc *qcc)
 		qcc_io_send(qcc);
 	}
 	else {
-		qcc->err = quic_err_app(QC_ERR_NO_ERROR);
+		qcc->err = quic_err_transport(QC_ERR_NO_ERROR);
 	}
 
 	/* Register "no error" code at transport layer. Do not use
@@ -2457,19 +2489,19 @@ static void qcc_release(struct qcc *qcc)
 		qcc->task = NULL;
 	}
 
-	tasklet_free(qcc->wait_event.tasklet);
-	if (conn && qcc->wait_event.events) {
-		conn->xprt->unsubscribe(conn, conn->xprt_ctx,
-		                        qcc->wait_event.events,
-		                        &qcc->wait_event);
-	}
-
 	/* liberate remaining qcs instances */
 	node = eb64_first(&qcc->streams_by_id);
 	while (node) {
 		struct qcs *qcs = eb64_entry(node, struct qcs, by_id);
 		node = eb64_next(node);
 		qcs_free(qcs);
+	}
+
+	tasklet_free(qcc->wait_event.tasklet);
+	if (conn && qcc->wait_event.events) {
+		conn->xprt->unsubscribe(conn, conn->xprt_ctx,
+		                        qcc->wait_event.events,
+		                        &qcc->wait_event);
 	}
 
 	while (!LIST_ISEMPTY(&qcc->lfctl.frms)) {
@@ -2609,6 +2641,7 @@ static int qmux_init(struct connection *conn, struct proxy *prx,
 	conn->ctx = qcc;
 	qcc->nb_hreq = qcc->nb_sc = 0;
 	qcc->flags = 0;
+	qcc->glitches = 0;
 	qcc->err = quic_err_transport(QC_ERR_NO_ERROR);
 
 	/* Server parameters, params used for RX flow control. */
@@ -2922,7 +2955,7 @@ static size_t qmux_strm_snd_buf(struct stconn *sc, struct buffer *buf,
 
 
 static size_t qmux_strm_nego_ff(struct stconn *sc, struct buffer *input,
-                                size_t count, unsigned int may_splice)
+                                size_t count, unsigned int flags)
 {
 	struct qcs *qcs = __sc_mux_strm(sc);
 	size_t ret = 0;
@@ -2937,11 +2970,6 @@ static size_t qmux_strm_nego_ff(struct stconn *sc, struct buffer *input,
 
 	/* stream layer has been detached so no transfer must occur after. */
 	BUG_ON_HOT(qcs->flags & QC_SF_DETACH);
-
-	if (global.tune.no_zero_copy_fwd & NO_ZERO_COPY_FWD_QUIC_SND) {
-		qcs->sd->iobuf.flags |= IOBUF_FL_NO_FF;
-		goto end;
-	}
 
 	if (!qcs->qcc->app_ops->nego_ff || !qcs->qcc->app_ops->done_ff) {
 		/* Fast forwarding is not supported by the QUIC application layer */
@@ -3018,10 +3046,20 @@ static size_t qmux_strm_done_ff(struct stconn *sc)
 		qcs->flags |= QC_SF_FIN_STREAM;
 	}
 
-	if (!(qcs->flags & QC_SF_FIN_STREAM) && !sd->iobuf.data)
-		goto end;
+	if (!(qcs->flags & QC_SF_FIN_STREAM) && !sd->iobuf.data) {
+		TRACE_STATE("no data sent", QMUX_EV_STRM_SEND, qcs->qcc->conn, qcs);
 
-	data += sd->iobuf.offset;
+		/* There is nothing to forward and the SD was blocked after a
+		 * successful nego by the producer. We can try to release the
+		 * TXBUF to retry. In this case, the TX buf MUST exist.
+		 */
+		if ((qcs->sd->iobuf.flags & IOBUF_FL_FF_WANT_ROOM) && !qcc_release_stream_txbuf(qcs))
+			qcs->sd->iobuf.flags &= ~(IOBUF_FL_FF_BLOCKED|IOBUF_FL_FF_WANT_ROOM);
+		goto end;
+	}
+
+	if (data)
+		data += sd->iobuf.offset;
 	total = qcs->qcc->app_ops->done_ff(qcs);
 
 	if (data || qcs->flags & QC_SF_FIN_STREAM)
@@ -3093,10 +3131,13 @@ static int qmux_wake(struct connection *conn)
 	return 1;
 }
 
-static void qmux_strm_shutw(struct stconn *sc, enum co_shw_mode mode)
+static void qmux_strm_shut(struct stconn *sc, enum se_shut_mode mode, struct se_abort_info *reason)
 {
 	struct qcs *qcs = __sc_mux_strm(sc);
 	struct qcc *qcc = qcs->qcc;
+
+	if (!(mode & (SE_SHW_SILENT|SE_SHW_NORMAL)))
+		return;
 
 	TRACE_ENTER(QMUX_EV_STRM_SHUT, qcc->conn, qcs);
 
@@ -3123,6 +3164,34 @@ static void qmux_strm_shutw(struct stconn *sc, enum co_shw_mode mode)
 
  out:
 	TRACE_LEAVE(QMUX_EV_STRM_SHUT, qcc->conn, qcs);
+}
+
+static int qmux_ctl(struct connection *conn, enum mux_ctl_type mux_ctl, void *output)
+{
+	struct qcc *qcc = conn->ctx;
+
+	switch (mux_ctl) {
+	case MUX_CTL_EXIT_STATUS:
+		return MUX_ES_UNKNOWN;
+
+	case MUX_CTL_GET_GLITCHES:
+		return qcc->glitches;
+
+	case MUX_CTL_GET_NBSTRM: {
+		struct qcs *qcs;
+		unsigned int nb_strm = qcc->nb_sc;
+
+		list_for_each_entry(qcs, &qcc->opening_list, el_opening)
+			nb_strm++;
+		return nb_strm;
+	}
+
+	case MUX_CTL_GET_MAXSTRM:
+		return qcc->lfctl.ms_bidi_init;
+
+	default:
+		return -1;
+	}
 }
 
 static int qmux_sctl(struct stconn *sc, enum mux_sctl_type mux_sctl, void *output)
@@ -3180,12 +3249,34 @@ static const struct mux_ops qmux_ops = {
 	.subscribe   = qmux_strm_subscribe,
 	.unsubscribe = qmux_strm_unsubscribe,
 	.wake        = qmux_wake,
-	.shutw       = qmux_strm_shutw,
+	.shut       = qmux_strm_shut,
+	.ctl         = qmux_ctl,
 	.sctl        = qmux_sctl,
 	.show_sd     = qmux_strm_show_sd,
 	.flags = MX_FL_HTX|MX_FL_NO_UPG|MX_FL_FRAMED,
 	.name = "QUIC",
 };
+
+void qcc_show_quic(struct qcc *qcc)
+{
+	struct eb64_node *node;
+	chunk_appendf(&trash, "  qcc=0x%p flags=0x%x sc=%llu hreq=%llu\n",
+	              qcc, qcc->flags, (ullong)qcc->nb_sc, (ullong)qcc->nb_hreq);
+
+	node = eb64_first(&qcc->streams_by_id);
+	while (node) {
+		struct qcs *qcs = eb64_entry(node, struct qcs, by_id);
+		chunk_appendf(&trash, "    qcs=0x%p id=%llu flags=0x%x st=%s",
+		              qcs, (ullong)qcs->id, qcs->flags,
+		              qcs_st_to_str(qcs->st));
+		if (!quic_stream_is_uni(qcs->id) || !quic_stream_is_local(qcc, qcs->id))
+			chunk_appendf(&trash, " rxoff=%llu", (ullong)qcs->rx.offset);
+		if (!quic_stream_is_uni(qcs->id) || !quic_stream_is_remote(qcc, qcs->id))
+			chunk_appendf(&trash, " txoff=%llu", (ullong)qcs->tx.fc.off_real);
+		chunk_appendf(&trash, "\n");
+		node = eb64_next(node);
+	}
+}
 
 static struct mux_proto_list mux_proto_quic =
   { .token = IST("quic"), .mode = PROTO_MODE_HTTP, .side = PROTO_SIDE_FE, .mux = &qmux_ops };

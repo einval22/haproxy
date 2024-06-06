@@ -105,11 +105,9 @@ enum {
 };
 
 /* bind ocsp update mode */
-enum {
-	SSL_SOCK_OCSP_UPDATE_DFLT     = 0,
-	SSL_SOCK_OCSP_UPDATE_OFF      = 1,
-	SSL_SOCK_OCSP_UPDATE_ON       = 2,
-};
+#define	SSL_SOCK_OCSP_UPDATE_OFF   -1
+#define	SSL_SOCK_OCSP_UPDATE_DFLT   0
+#define	SSL_SOCK_OCSP_UPDATE_ON     1
 
 /* states of the CLI IO handler for 'set ssl cert' */
 enum {
@@ -264,6 +262,7 @@ struct ssl_sock_ctx {
 
 struct global_ssl {
 	char *crt_base;             /* base directory path for certificates */
+	char *key_base;             /* base directory path for private keys */
 	char *ca_base;              /* base directory path for CAs and CRLs */
 	char *issuers_chain_path;   /* from "issuers-chain-path" */
 	int  skip_self_issued_ca;
@@ -303,11 +302,14 @@ struct global_ssl {
 	int keylog; /* activate keylog  */
 	int extra_files; /* which files not defined in the configuration file are we looking for */
 	int extra_files_noext; /* whether we remove the extension when looking up a extra file */
+	int security_level;    /* configure the openssl security level */
 
 #ifndef OPENSSL_NO_OCSP
 	struct {
 		unsigned int delay_max;
 		unsigned int delay_min;
+		int mode; /* default mode used for ocsp auto-update (off, on) */
+		int disable;
 	} ocsp_update;
 #endif
 };

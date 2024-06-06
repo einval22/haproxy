@@ -455,7 +455,7 @@ static struct proxy *cli_alloc_fe(const char *name, const char *file, int line)
 	init_new_proxy(fe);
 	fe->next = proxies_list;
 	proxies_list = fe;
-	fe->last_change = ns_to_sec(now_ns);
+	fe->fe_counters.last_change = ns_to_sec(now_ns);
 	fe->id = strdup("GLOBAL");
 	fe->cap = PR_CAP_FE|PR_CAP_INT;
 	fe->maxconn = 10;                 /* default to 10 concurrent connections */
@@ -742,9 +742,8 @@ static int cli_parse_request(struct appctx *appctx)
 	int i = 0;
 	struct cli_kw *kw;
 
-	p = appctx->chunk->area;
-	end = p + appctx->chunk->data;
-
+	p = b_head(&appctx->inbuf);
+	end = b_tail(&appctx->inbuf);
 	/*
 	 * Get pointers on words.
 	 * One extra slot is reserved to store a pointer on a null byte.
@@ -806,7 +805,7 @@ static int cli_parse_request(struct appctx *appctx)
 		i++;
 	}
 	/* fill unused slots */
-	p = appctx->chunk->area + appctx->chunk->data;
+	p = b_tail(&appctx->inbuf);
 	for (; i < MAX_CLI_ARGS + 1; i++)
 		args[i] = p;
 
@@ -861,12 +860,13 @@ fail:
 static int cli_output_msg(struct appctx *appctx, const char *msg, int severity, int severity_output)
 {
 	struct buffer *tmp;
-
-	if (likely(severity_output == CLI_SEVERITY_NONE))
-		return applet_putstr(appctx, msg);
+	struct ist imsg;
 
 	tmp = get_trash_chunk();
 	chunk_reset(tmp);
+
+	if (likely(severity_output == CLI_SEVERITY_NONE))
+		goto send_it;
 
 	if (severity < 0 || severity > 7) {
 		ha_warning("socket command feedback with invalid severity %d", severity);
@@ -884,9 +884,164 @@ static int cli_output_msg(struct appctx *appctx, const char *msg, int severity, 
 				ha_warning("Unrecognized severity output %d", severity_output);
 		}
 	}
-	chunk_appendf(tmp, "%s", msg);
+ send_it:
+	/* the vast majority of messages have their trailing LF but a few are
+	 * still missing it, and very rare ones might even have two. For this
+	 * reason, we'll first delete the trailing LFs if present, then
+	 * systematically append one.
+	 */
+	for (imsg = ist(msg); imsg.len > 0 && imsg.ptr[imsg.len - 1] == '\n'; imsg.len--)
+		;
+
+	chunk_istcat(tmp, imsg);
+	chunk_istcat(tmp, ist("\n"));
 
 	return applet_putchk(appctx, tmp);
+}
+
+int cli_init(struct appctx *appctx)
+{
+	struct stconn *sc = appctx_sc(appctx);
+	struct bind_conf *bind_conf = strm_li(__sc_strm(sc))->bind_conf;
+
+	appctx->cli_severity_output = bind_conf->severity_output;
+	applet_reset_svcctx(appctx);
+	appctx->st0 = CLI_ST_GETREQ;
+	appctx->cli_level = bind_conf->level;
+
+	/* Wakeup the applet ASAP. */
+        applet_need_more_data(appctx);
+        return 0;
+
+}
+
+size_t cli_snd_buf(struct appctx *appctx, struct buffer *buf, size_t count, unsigned flags)
+{
+	char *str;
+	size_t len, ret = 0;
+	int lf = 0;
+
+	if (appctx->st0 == CLI_ST_INIT)
+		cli_init(appctx);
+	else if (appctx->st0 != CLI_ST_GETREQ)
+		goto end;
+
+        if (b_space_wraps(&appctx->inbuf))
+                b_slow_realign(&appctx->inbuf, trash.area, b_data(&appctx->inbuf));
+
+	while (1) {
+		/* payload doesn't take escapes nor does it end on semi-colons,
+		 * so we use the regular getline. Normal mode however must stop
+		 * on LFs and semi-colons that are not prefixed by a backslash.
+		 * Note we reserve one byte at the end to insert a trailing nul
+		 * byte.
+		 */
+		str = b_tail(&appctx->inbuf);
+		if (!(appctx->st1 & APPCTX_CLI_ST1_PAYLOAD))
+			len = b_getdelim(buf, ret, count, str, b_room(&appctx->inbuf) - 1, "\n;", '\\');
+		else
+			len = b_getline(buf, ret, count, str, b_room(&appctx->inbuf) - 1);
+
+		if (!len) {
+			if (!b_room(buf) || (count > b_room(&appctx->inbuf) - 1)) {
+				cli_err(appctx, "The command is too big for the buffer size. Please change tune.bufsize in the configuration to use a bigger command.\n");
+				applet_set_error(appctx);
+				b_reset(&appctx->inbuf);
+			}
+			else if (flags & CO_SFL_LAST_DATA) {
+				applet_set_eos(appctx);
+				applet_set_error(appctx);
+				b_reset(&appctx->inbuf);
+			}
+			break;
+		}
+
+		ret += len;
+		count -= len;
+
+		if (str[len-1] == '\n')
+			lf = 1;
+
+		/* Remove the trailing \r, if any and add a null byte at the
+		 * end. For normal mode, the trailing \n is removed, but we
+		 * conserve if for payload mode.
+		 */
+		len--;
+		if (len && str[len-1] == '\r')
+			len--;
+		if (appctx->st1 & APPCTX_CLI_ST1_PAYLOAD) {
+			str[len+1] = '\0';
+			b_add(&appctx->inbuf, len+1);
+		}
+		else  {
+			str[len] = '\0';
+			b_add(&appctx->inbuf, len);
+		}
+
+		if (appctx->st1 & APPCTX_CLI_ST1_PAYLOAD) {
+			/* look for a pattern */
+			if (len == strlen(appctx->cli_payload_pat)) {
+				/* here use 'len' because str still contains the \n */
+				if (strncmp(str, appctx->cli_payload_pat, len) == 0) {
+					/* remove the last two \n */
+					b_sub(&appctx->inbuf, strlen(appctx->cli_payload_pat) + 2);
+					*b_tail(&appctx->inbuf) = '\0';
+					appctx->st1 &= ~APPCTX_CLI_ST1_PAYLOAD;
+					if (!(appctx->st1 & APPCTX_CLI_ST1_PROMPT) && lf)
+						appctx->st1 |= APPCTX_CLI_ST1_LASTCMD;
+				}
+			}
+		}
+		else {
+			char *last_arg;
+
+			/*
+			 * Look for the "payload start" pattern at the end of a
+			 * line Its location is not remembered here, this is
+			 * just to switch to a gathering mode.
+			 *
+			 * The pattern must start by << followed by 0 to 7
+			 * characters, and finished by the end of the command
+			 * (\n or ;).
+			 */
+
+			/* look for the first space starting by the end of the line */
+			for (last_arg = b_tail(&appctx->inbuf); last_arg != b_head(&appctx->inbuf); last_arg--) {
+				if (*last_arg == ' ' || *last_arg == '\t') {
+					last_arg++;
+					break;
+				}
+			}
+
+			if (strncmp(last_arg, PAYLOAD_PATTERN, strlen(PAYLOAD_PATTERN)) == 0) {
+				ssize_t pat_len = strlen(last_arg + strlen(PAYLOAD_PATTERN));
+
+				/* A customized pattern can't be more than 7 characters
+				 * if it's more, don't make it a payload
+				 */
+				if (pat_len < sizeof(appctx->cli_payload_pat)) {
+					appctx->st1 |= APPCTX_CLI_ST1_PAYLOAD;
+					/* copy the customized pattern, don't store the << */
+					strncpy(appctx->cli_payload_pat, last_arg + strlen(PAYLOAD_PATTERN), sizeof(appctx->cli_payload_pat)-1);
+					appctx->cli_payload_pat[sizeof(appctx->cli_payload_pat)-1] = '\0';
+					b_add(&appctx->inbuf, 1); // keep the trailing \0 after the pattern
+				}
+			}
+			else {
+				if (!(appctx->st1 & APPCTX_CLI_ST1_PROMPT) && lf)
+					appctx->st1 |= APPCTX_CLI_ST1_LASTCMD;
+			}
+		}
+
+		if (!(appctx->st1 & APPCTX_CLI_ST1_PAYLOAD) || (appctx->st1 & APPCTX_CLI_ST1_PROMPT)) {
+			appctx->st0 = CLI_ST_PARSEREQ;
+			break;
+		}
+	}
+	b_del(buf, ret);
+
+  end:
+	return ret;
 }
 
 /* This I/O handler runs as an applet embedded in a stream connector. It is
@@ -899,190 +1054,62 @@ static int cli_output_msg(struct appctx *appctx, const char *msg, int severity, 
  */
 static void cli_io_handler(struct appctx *appctx)
 {
-	struct stconn *sc = appctx_sc(appctx);
-	struct channel *req = sc_oc(sc);
-	struct channel *res = sc_ic(sc);
-	struct bind_conf *bind_conf = strm_li(__sc_strm(sc))->bind_conf;
-	int reql;
-	int len;
+	if (applet_fl_test(appctx, APPCTX_FL_OUTBLK_ALLOC|APPCTX_FL_OUTBLK_FULL))
+		goto out;
 
-	if (unlikely(se_fl_test(appctx->sedesc, (SE_FL_EOS|SE_FL_ERROR|SE_FL_SHR|SE_FL_SHW)))) {
-		co_skip(sc_oc(sc), co_data(sc_oc(sc)));
+	if (!appctx_get_buf(appctx, &appctx->outbuf)) {
 		goto out;
 	}
 
-	/* Check if the input buffer is available. */
-	if (!b_size(&res->buf)) {
-		sc_need_room(sc, 0);
+	if (unlikely(applet_fl_test(appctx, APPCTX_FL_EOS|APPCTX_FL_ERROR))) {
+		appctx->st0 = CLI_ST_END;
 		goto out;
 	}
 
 	while (1) {
 		if (appctx->st0 == CLI_ST_INIT) {
 			/* reset severity to default at init */
-			appctx->cli_severity_output = bind_conf->severity_output;
-			applet_reset_svcctx(appctx);
-			appctx->st0 = CLI_ST_GETREQ;
-			appctx->cli_level = bind_conf->level;
+			cli_init(appctx);
+			break;
 		}
 		else if (appctx->st0 == CLI_ST_END) {
-			se_fl_set(appctx->sedesc, SE_FL_EOS);
-			free_trash_chunk(appctx->chunk);
-			appctx->chunk = NULL;
+			applet_set_eos(appctx);
 			break;
 		}
 		else if (appctx->st0 == CLI_ST_GETREQ) {
-			char *str;
-
-			/* use a trash chunk to store received data */
-			if (!appctx->chunk) {
-				appctx->chunk = alloc_trash_chunk();
-				if (!appctx->chunk) {
-					se_fl_set(appctx->sedesc, SE_FL_ERROR);
-					appctx->st0 = CLI_ST_END;
-					continue;
-				}
+			/* Now we close the output if we're not in interactive
+			 * mode and the request buffer is empty. This still
+			 * allows pipelined requests to be sent in
+			 * non-interactive mode.
+			 */
+			if (se_fl_test(appctx->sedesc, SE_FL_SHW)) {
+				appctx->st0 = CLI_ST_END;
+				continue;
 			}
-
-			str = appctx->chunk->area + appctx->chunk->data;
-
+			break;
+		}
+		else if (appctx->st0 == CLI_ST_PARSEREQ) {
 			/* ensure we have some output room left in the event we
 			 * would want to return some info right after parsing.
 			 */
-			if (buffer_almost_full(sc_ib(sc))) {
-				sc_need_room(sc, b_size(&res->buf) / 2);
+			if (buffer_almost_full(&appctx->outbuf)) {
+				applet_fl_set(appctx, APPCTX_FL_OUTBLK_FULL);
 				break;
 			}
 
-			/* payload doesn't take escapes nor does it end on semi-colons, so
-			 * we use the regular getline. Normal mode however must stop on
-			 * LFs and semi-colons that are not prefixed by a backslash. Note
-			 * that we reserve one byte at the end to insert a trailing nul byte.
-			 */
-
-			if (appctx->st1 & APPCTX_CLI_ST1_PAYLOAD)
-				reql = co_getline(sc_oc(sc), str,
-				                  appctx->chunk->size - appctx->chunk->data - 1);
-			else
-				reql = co_getdelim(sc_oc(sc), str,
-				                   appctx->chunk->size - appctx->chunk->data - 1,
-				                   "\n;", '\\');
-
-			if (reql <= 0) { /* closed or EOL not found */
-				if (reql == 0)
-					break;
-				se_fl_set(appctx->sedesc, SE_FL_ERROR);
-				appctx->st0 = CLI_ST_END;
-				continue;
-			}
-
-			if (!(appctx->st1 & APPCTX_CLI_ST1_PAYLOAD)) {
-				/* seek for a possible unescaped semi-colon. If we find
-				 * one, we replace it with an LF and skip only this part.
-				 */
-				for (len = 0; len < reql; len++) {
-					if (str[len] == '\\') {
-						len++;
-						continue;
-					}
-					if (str[len] == ';') {
-						str[len] = '\n';
-						reql = len + 1;
-						break;
-					}
-				}
-			}
-
-			/* now it is time to check that we have a full line,
-			 * remove the trailing \n and possibly \r, then cut the
-			 * line.
-			 */
-			len = reql - 1;
-			if (str[len] != '\n') {
-				se_fl_set(appctx->sedesc, SE_FL_ERROR);
-				appctx->st0 = CLI_ST_END;
-				continue;
-			}
-
-			if (len && str[len-1] == '\r')
-				len--;
-
-			str[len] = '\0';
-			appctx->chunk->data += len;
-
-			if (appctx->st1 & APPCTX_CLI_ST1_PAYLOAD) {
-				appctx->chunk->area[appctx->chunk->data] = '\n';
-				appctx->chunk->area[appctx->chunk->data + 1] = 0;
-				appctx->chunk->data++;
-			}
-
+			appctx->t->expire = TICK_ETERNITY;
 			appctx->st0 = CLI_ST_PROMPT;
 
-			if (appctx->st1 & APPCTX_CLI_ST1_PAYLOAD) {
-				/* look for a pattern */
-				if (len == strlen(appctx->cli_payload_pat)) {
-					/* here use 'len' because str still contains the \n */
-					if (strncmp(str, appctx->cli_payload_pat, len) == 0) {
-						/* remove the last two \n */
-						appctx->chunk->data -= strlen(appctx->cli_payload_pat) + 2;
-						appctx->chunk->area[appctx->chunk->data] = 0;
-						cli_parse_request(appctx);
-						chunk_reset(appctx->chunk);
-						/* NB: cli_sock_parse_request() may have put
-						 * another CLI_ST_O_* into appctx->st0.
-						 */
-
-						appctx->st1 &= ~APPCTX_CLI_ST1_PAYLOAD;
-					}
-				}
+			if (!(appctx->st1 & APPCTX_CLI_ST1_PAYLOAD)) {
+				cli_parse_request(appctx);
+				b_reset(&appctx->inbuf);
 			}
-			else {
-				char *last_arg;
-				/*
-				 * Look for the "payload start" pattern at the end of a line
-				 * Its location is not remembered here, this is just to switch
-				 * to a gathering mode.
-				 * The pattern must start by << followed by 0
-				 * to 7 characters, and finished by the end of
-				 * the command (\n or ;).
-				 */
-				/* look for the first space starting by the end of the line */
-				for (last_arg = appctx->chunk->area + appctx->chunk->data; last_arg != appctx->chunk->area; last_arg--) {
-					if (*last_arg == ' ' || *last_arg == '\t') {
-						last_arg++;
-						break;
-					}
-				}
-				if (strncmp(last_arg, PAYLOAD_PATTERN, strlen(PAYLOAD_PATTERN)) == 0) {
-					ssize_t pat_len = strlen(last_arg + strlen(PAYLOAD_PATTERN));
-
-					/* A customized pattern can't be more than 7 characters
-					 * if it's more, don't make it a payload
-					 */
-					if (pat_len < sizeof(appctx->cli_payload_pat)) {
-						appctx->st1 |= APPCTX_CLI_ST1_PAYLOAD;
-						/* copy the customized pattern, don't store the << */
-						strncpy(appctx->cli_payload_pat, last_arg + strlen(PAYLOAD_PATTERN), sizeof(appctx->cli_payload_pat)-1);
-						appctx->cli_payload_pat[sizeof(appctx->cli_payload_pat)-1] = '\0';
-						appctx->chunk->data++; // keep the trailing \0 after the pattern
-					}
-				}
-				else {
-					/* no payload, the command is complete: parse the request */
-					cli_parse_request(appctx);
-					chunk_reset(appctx->chunk);
-				}
-			}
-
-			/* re-adjust req buffer */
-			co_skip(sc_oc(sc), reql);
-			sc_opposite(sc)->flags |= SC_FL_RCV_ONCE; /* we plan to read small requests */
 		}
 		else {	/* output functions */
 			struct cli_print_ctx *ctx;
 			const char *msg;
 			int sev;
-
+		cli_output:
 			switch (appctx->st0) {
 			case CLI_ST_PROMPT:
 				break;
@@ -1128,17 +1155,28 @@ static void cli_io_handler(struct appctx *appctx)
 					         appctx->st0 == CLI_ST_PRINT_UMSGERR) {
 						usermsgs_clr(NULL);
 					}
+					appctx->t->expire = TICK_ETERNITY;
 					appctx->st0 = CLI_ST_PROMPT;
 				}
+				if (applet_fl_test(appctx, APPCTX_FL_ERR_PENDING)) {
+					appctx->st0 = CLI_ST_END;
+					continue;
+				}
+
 				break;
 
 			case CLI_ST_CALLBACK: /* use custom pointer */
 				if (appctx->io_handler)
 					if (appctx->io_handler(appctx)) {
+						appctx->t->expire = TICK_ETERNITY;
 						appctx->st0 = CLI_ST_PROMPT;
 						if (appctx->io_release) {
 							appctx->io_release(appctx);
 							appctx->io_release = NULL;
+							/* some release handlers might have
+							 * pending output to print.
+							 */
+							continue;
 						}
 					}
 				break;
@@ -1157,7 +1195,7 @@ static void cli_io_handler(struct appctx *appctx)
 					 * when entering a payload with interactive mode, change the prompt
 					 * to emphasize that more data can still be sent
 					 */
-					if (appctx->chunk->data && appctx->st1 & APPCTX_CLI_ST1_PAYLOAD)
+					if (b_data(&appctx->inbuf) && appctx->st1 & APPCTX_CLI_ST1_PAYLOAD)
 						prompt = "+ ";
 					else if (appctx->st1 & APPCTX_CLI_ST1_TIMED) {
 						uint up = ns_to_sec(now_ns - start_time_ns);
@@ -1191,8 +1229,8 @@ static void cli_io_handler(struct appctx *appctx)
 			 * allows pipelined requests to be sent in
 			 * non-interactive mode.
 			 */
-			if (!(appctx->st1 & APPCTX_CLI_ST1_PROMPT) && !co_data(req) && (!(appctx->st1 & APPCTX_CLI_ST1_PAYLOAD))) {
-				se_fl_set(appctx->sedesc, SE_FL_EOI);
+			if ((appctx->st1 & (APPCTX_CLI_ST1_PROMPT|APPCTX_CLI_ST1_PAYLOAD|APPCTX_CLI_ST1_LASTCMD)) == APPCTX_CLI_ST1_LASTCMD) {
+				applet_set_eoi(appctx);
 				appctx->st0 = CLI_ST_END;
 				continue;
 			}
@@ -1212,14 +1250,16 @@ static void cli_io_handler(struct appctx *appctx)
 			 * refills the buffer with new bytes in non-interactive
 			 * mode, avoiding to close on apparently empty commands.
 			 */
-			if (co_data(sc_oc(sc))) {
-				appctx_wakeup(appctx);
-				goto out;
-			}
+			break;
 		}
 	}
 
  out:
+	if (appctx->st0 == CLI_ST_END) {
+		/* eat the whole request */
+		b_reset(&appctx->inbuf);
+		applet_fl_clr(appctx, APPCTX_FL_INBLK_FULL);
+	}
 	return;
 }
 
@@ -1229,9 +1269,6 @@ static void cli_io_handler(struct appctx *appctx)
  */
 static void cli_release_handler(struct appctx *appctx)
 {
-	free_trash_chunk(appctx->chunk);
-	appctx->chunk = NULL;
-
 	if (appctx->io_release) {
 		appctx->io_release(appctx);
 		appctx->io_release = NULL;
@@ -1254,12 +1291,7 @@ static void cli_release_handler(struct appctx *appctx)
 static int cli_io_handler_show_env(struct appctx *appctx)
 {
 	struct show_env_ctx *ctx = appctx->svcctx;
-	struct stconn *sc = appctx_sc(appctx);
 	char **var = ctx->var;
-
-	/* FIXME: Don't watch the other side !*/
-	if (unlikely(sc_opposite(sc)->flags & SC_FL_SHUT_DONE))
-		return 1;
 
 	chunk_reset(&trash);
 
@@ -1290,15 +1322,10 @@ static int cli_io_handler_show_env(struct appctx *appctx)
  */
 static int cli_io_handler_show_fd(struct appctx *appctx)
 {
-	struct stconn *sc = appctx_sc(appctx);
 	struct show_fd_ctx *fdctx = appctx->svcctx;
 	uint match = fdctx->show_mask;
 	int fd = fdctx->fd;
 	int ret = 1;
-
-	/* FIXME: Don't watch the other side !*/
-	if (unlikely(sc_opposite(sc)->flags & SC_FL_SHUT_DONE))
-		goto end;
 
 	chunk_reset(&trash);
 
@@ -1990,6 +2017,174 @@ static int cli_parse_set_ratelimit(char **args, char *payload, struct appctx *ap
 	dequeue_all_listeners();
 
 	return 1;
+}
+
+/* Parse a "wait <time>" command.
+ * It uses a "cli_wait_ctx" struct for its context.
+ * Returns 0 if the server deletion has been successfully scheduled, 1 on failure.
+ */
+static int cli_parse_wait(char **args, char *payload, struct appctx *appctx, void *private)
+{
+	struct cli_wait_ctx *ctx = applet_reserve_svcctx(appctx, sizeof(*ctx));
+	uint wait_ms;
+	const char *err;
+
+	if (!cli_has_level(appctx, ACCESS_LVL_ADMIN))
+		return 1;
+
+	if (!*args[1])
+		return cli_err(appctx, "Expects a duration in milliseconds.\n");
+
+	err = parse_time_err(args[1], &wait_ms, TIME_UNIT_MS);
+	if (err || wait_ms < 1) {
+		/* in case -h is passed as the first option, continue to the next test */
+		if (strcmp(args[1], "-h") == 0)
+			args--;
+		else
+			return cli_err(appctx, "Invalid duration.\n");
+	}
+
+	if (strcmp(args[2], "srv-removable") == 0) {
+		struct ist be_name, sv_name;
+
+		if (!*args[3])
+			return cli_err(appctx, "Missing server name (<backend>/<server>).\n");
+
+		sv_name = ist(args[3]);
+		be_name = istsplit(&sv_name, '/');
+		if (!istlen(sv_name))
+			return cli_err(appctx, "Require 'backend/server'.\n");
+
+		be_name = istdup(be_name);
+		sv_name = istdup(sv_name);
+		if (!isttest(be_name) || !isttest(sv_name)) {
+			free(istptr(be_name));
+			free(istptr(sv_name));
+			return cli_err(appctx, "Out of memory trying to clone the server name.\n");
+		}
+
+		ctx->args[0] = ist0(be_name);
+		ctx->args[1] = ist0(sv_name);
+		ctx->cond = CLI_WAIT_COND_SRV_UNUSED;
+	}
+	else if (*args[2]) {
+		/* show the command's help either upon request (-h) or error */
+		err = "Usage: wait {-h|<duration>} [condition [args...]]\n"
+			"  - '-h' displays this help\n"
+			"  - <duration> is the maximum wait time, optionally suffixed by the unit among\n"
+			"    'us', 'ms', 's', 'm', 'h', and 'd'. ; the default unit is milliseconds.\n"
+			"  - <condition> indicates what to wait for, no longer than the specified\n"
+			"    duration. Supported conditions are:\n"
+			"    - <none> : by default, just sleep for the specified duration.\n"
+			"    - srv-removable <px>/<sv> : wait for this server to become removable.\n"
+			"";
+
+		if (strcmp(args[2], "-h") == 0)
+			return cli_msg(appctx, LOG_INFO, err);
+		else
+			return cli_err(appctx, err);
+	}
+
+	ctx->start = now_ms;
+	ctx->deadline = tick_add(now_ms, wait_ms);
+
+	/* proceed with the I/O handler */
+	return 0;
+}
+
+/* Execute a "wait" condition. The delay is exponentially incremented between
+ * now_ms and ctx->deadline in powers of 1.5 and with a bound set to 10% of the
+ * programmed wait time, so that in a few wakeups we can later check a condition
+ * with reasonable accuracy. Shutdowns and other errors are handled as well and
+ * terminate the operation, but not new inputs so that it remains possible to
+ * chain other commands after it. Returns 0 if not finished, 1 if finished.
+ */
+static int cli_io_handler_wait(struct appctx *appctx)
+{
+	struct cli_wait_ctx *ctx = appctx->svcctx;
+	uint total, elapsed, left, wait;
+	int ret;
+
+	/* note: upon first invocation, the timeout is not set */
+	if (tick_isset(appctx->t->expire) &&
+	    !tick_is_expired(appctx->t->expire, now_ms))
+		goto wait;
+
+	/* here we should evaluate our waiting conditions, if any */
+
+	if (ctx->cond == CLI_WAIT_COND_SRV_UNUSED) {
+		/* check if the server in args[0]/args[1] can be released now */
+		thread_isolate();
+		ret = srv_check_for_deletion(ctx->args[0], ctx->args[1], NULL, NULL, NULL);
+		thread_release();
+
+		if (ret < 0) {
+			/* unrecoverable failure */
+			ctx->error = CLI_WAIT_ERR_FAIL;
+			return 1;
+		} else if (ret > 0) {
+			/* immediate success */
+			ctx->error = CLI_WAIT_ERR_DONE;
+			return 1;
+		}
+		/* let's check the timer */
+	}
+
+	/* and here we recalculate the new wait time or abort */
+	left  = tick_remain(now_ms, ctx->deadline);
+	if (!left) {
+		/* let the release handler know we've expired. When there is no
+		 * wait condition, it's a simple sleep so we declare we're done.
+		 */
+		if (ctx->cond == CLI_WAIT_COND_NONE)
+			ctx->error = CLI_WAIT_ERR_DONE;
+		else
+			ctx->error = CLI_WAIT_ERR_EXP;
+		return 1;
+	}
+
+	total = tick_remain(ctx->start, ctx->deadline);
+	elapsed = total - left;
+	wait = elapsed / 2 + 1;
+	if (wait > left)
+		wait = left;
+	else if (wait > total / 10)
+		wait = total / 10;
+
+	appctx->t->expire = tick_add(now_ms, wait);
+
+ wait:
+	/* Stop waiting upon close/abort/error */
+	if (unlikely(se_fl_test(appctx->sedesc, SE_FL_SHW)) && !b_data(&appctx->inbuf)) {
+		ctx->error = CLI_WAIT_ERR_INTR;
+		return 1;
+	}
+
+	return 0;
+}
+
+
+/* release structs allocated by "delete server" */
+static void cli_release_wait(struct appctx *appctx)
+{
+	struct cli_wait_ctx *ctx = appctx->svcctx;
+	const char *msg;
+	int i;
+
+	switch (ctx->error) {
+	case CLI_WAIT_ERR_EXP:      msg = "Wait delay expired.\n"; break;
+	case CLI_WAIT_ERR_INTR:     msg = "Interrupted.\n"; break;
+	case CLI_WAIT_ERR_FAIL:     msg = ctx->msg ? ctx->msg : "Failed.\n"; break;
+	default:                    msg = "Done.\n"; break;
+	}
+
+	for (i = 0; i < sizeof(ctx->args) / sizeof(ctx->args[0]); i++)
+		ha_free(&ctx->args[i]);
+
+	if (ctx->error == CLI_WAIT_ERR_DONE)
+		cli_msg(appctx, LOG_INFO, msg);
+	else
+		cli_err(appctx, msg);
 }
 
 /* parse the "expose-fd" argument on the bind lines */
@@ -2946,7 +3141,7 @@ int pcli_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 		pendconn_free(s);
 
 		/* let's do a final log if we need it */
-		if (!LIST_ISEMPTY(&fe->logformat) && s->logs.logwait &&
+		if (!lf_expr_isempty(&fe->logformat) && s->logs.logwait &&
 		    !(s->flags & SF_MONITOR) &&
 		    (!(fe->options & PR_O_NULLNOLOG) || s->req.total)) {
 			s->do_log(s);
@@ -3353,6 +3548,8 @@ static struct applet cli_applet = {
 	.obj_type = OBJ_TYPE_APPLET,
 	.name = "<CLI>", /* used for logging */
 	.fct = cli_io_handler,
+	.rcv_buf = appctx_raw_rcv_buf,
+	.snd_buf = cli_snd_buf,
 	.release = cli_release_handler,
 };
 
@@ -3361,6 +3558,8 @@ static struct applet mcli_applet = {
 	.obj_type = OBJ_TYPE_APPLET,
 	.name = "<MCLI>", /* used for logging */
 	.fct = cli_io_handler,
+	.rcv_buf = appctx_raw_rcv_buf,
+	.snd_buf = cli_snd_buf,
 	.release = cli_release_handler,
 };
 
@@ -3388,6 +3587,7 @@ static struct cli_kw_list cli_kws = {{ },{
 	{ { "show", "version", NULL },           "show version                            : show version of the current process",                     cli_parse_show_version, NULL, NULL, NULL, ACCESS_MASTER },
 	{ { "operator", NULL },                  "operator                                : lower the level of the current CLI session to operator",  cli_parse_set_lvl, NULL, NULL, NULL, ACCESS_MASTER},
 	{ { "user", NULL },                      "user                                    : lower the level of the current CLI session to user",      cli_parse_set_lvl, NULL, NULL, NULL, ACCESS_MASTER},
+	{ { "wait", NULL },                      "wait {-h|<delay_ms>} cond [args...]     : wait the specified delay or condition (-h to see list)",  cli_parse_wait, cli_io_handler_wait, cli_release_wait, NULL },
 	{{},}
 }};
 

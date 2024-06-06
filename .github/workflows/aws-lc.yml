@@ -24,7 +24,7 @@ jobs:
           echo "result=$result" >> $GITHUB_OUTPUT
       - name: Cache AWS-LC
         id: cache_aws_lc
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: '~/opt/'
           key: ssl-${{ steps.get_aws_lc_release.outputs.result }}-Ubuntu-latest-gcc
@@ -36,7 +36,7 @@ jobs:
           make -j$(nproc) CC=gcc TARGET=linux-glibc \
             USE_OPENSSL_AWSLC=1 USE_QUIC=1 \
             SSL_LIB=${HOME}/opt/lib SSL_INC=${HOME}/opt/include \
-            DEBUG="-DDEBUG_STRICT -DDEBUG_MEMORY_POOLS -DDEBUG_POOL_INTEGRITY" \
+            DEBUG="-DDEBUG_POOL_INTEGRITY" \
             ADDLIB="-Wl,-rpath,/usr/local/lib/ -Wl,-rpath,$HOME/opt/lib/"
           sudo make install
       - name: Show HAProxy version

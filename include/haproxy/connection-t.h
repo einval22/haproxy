@@ -37,6 +37,8 @@
 #include <haproxy/port_range-t.h>
 #include <haproxy/protocol-t.h>
 #include <haproxy/show_flags-t.h>
+#include <haproxy/stconn-t.h>
+#include <haproxy/task-t.h>
 #include <haproxy/thread-t.h>
 
 /* referenced below */
@@ -53,14 +55,6 @@ struct quic_conn;
 struct bind_conf;
 struct qcs;
 struct ssl_sock_ctx;
-
-/* Note: subscribing to these events is only valid after the caller has really
- * attempted to perform the operation, and failed to proceed or complete.
- */
-enum sub_event_type {
-	SUB_RETRY_RECV       = 0x00000001,  /* Schedule the tasklet when we can attempt to recv again */
-	SUB_RETRY_SEND       = 0x00000002,  /* Schedule the tasklet when we can attempt to send again */
-};
 
 /* For each direction, we have a CO_FL_XPRT_<DIR>_ENA flag, which
  * indicates if read or write is desired in that direction for the respective
@@ -87,10 +81,11 @@ enum {
 
 	CO_FL_REVERSED      = 0x00000004,  /* connection has been reversed to backend / reversed and accepted on frontend */
 	CO_FL_ACT_REVERSING = 0x00000008,  /* connection has been reversed to frontend but not yet accepted */
-	/* unused : 0x00000008 */
 
-	/* unused : 0x00000010 */
-	/* unused : 0x00000020 */
+	CO_FL_OPT_MARK      = 0x00000010,  /* connection has a special sockopt mark */
+
+	CO_FL_OPT_TOS       = 0x00000020,  /* connection has a special sockopt tos */
+
 	/* unused : 0x00000040, 0x00000080 */
 
 	/* These flags indicate whether the Control and Transport layers are initialized */
@@ -173,13 +168,14 @@ static forceinline char *conn_show_flags(char *buf, size_t len, const char *deli
 	_(0);
 	/* flags */
 	_(CO_FL_SAFE_LIST, _(CO_FL_IDLE_LIST, _(CO_FL_CTRL_READY,
-	_(CO_FL_REVERSED, _(CO_FL_ACT_REVERSING, _(CO_FL_XPRT_READY,
-	_(CO_FL_WANT_DRAIN, _(CO_FL_WAIT_ROOM, _(CO_FL_EARLY_SSL_HS, _(CO_FL_EARLY_DATA,
-	_(CO_FL_SOCKS4_SEND, _(CO_FL_SOCKS4_RECV, _(CO_FL_SOCK_RD_SH, _(CO_FL_SOCK_WR_SH,
-	_(CO_FL_ERROR, _(CO_FL_FDLESS, _(CO_FL_WAIT_L4_CONN, _(CO_FL_WAIT_L6_CONN,
-	_(CO_FL_SEND_PROXY, _(CO_FL_ACCEPT_PROXY, _(CO_FL_ACCEPT_CIP, _(CO_FL_SSL_WAIT_HS,
-	_(CO_FL_PRIVATE, _(CO_FL_RCVD_PROXY, _(CO_FL_SESS_IDLE, _(CO_FL_XPRT_TRACKED
-	))))))))))))))))))))))))));
+	_(CO_FL_REVERSED, _(CO_FL_ACT_REVERSING, _(CO_FL_OPT_MARK, _(CO_FL_OPT_TOS,
+	_(CO_FL_XPRT_READY, _(CO_FL_WANT_DRAIN, _(CO_FL_WAIT_ROOM, _(CO_FL_EARLY_SSL_HS,
+	_(CO_FL_EARLY_DATA, _(CO_FL_SOCKS4_SEND, _(CO_FL_SOCKS4_RECV, _(CO_FL_SOCK_RD_SH,
+	_(CO_FL_SOCK_WR_SH, _(CO_FL_ERROR, _(CO_FL_FDLESS, _(CO_FL_WAIT_L4_CONN,
+	_(CO_FL_WAIT_L6_CONN, _(CO_FL_SEND_PROXY, _(CO_FL_ACCEPT_PROXY, _(CO_FL_ACCEPT_CIP,
+	_(CO_FL_SSL_WAIT_HS, _(CO_FL_PRIVATE, _(CO_FL_RCVD_PROXY, _(CO_FL_SESS_IDLE,
+	_(CO_FL_XPRT_TRACKED
+	))))))))))))))))))))))))))));
 	/* epilogue */
 	_(~0U);
 	return buf;
@@ -283,18 +279,7 @@ enum {
 enum {
 	CO_SFL_MSG_MORE    = 0x0001,    /* More data to come afterwards */
 	CO_SFL_STREAMER    = 0x0002,    /* Producer is continuously streaming data */
-};
-
-/* mux->shutr() modes */
-enum co_shr_mode {
-	CO_SHR_DRAIN        = 0,           /* read shutdown, drain any extra stuff */
-	CO_SHR_RESET        = 1,           /* read shutdown, reset any extra stuff */
-};
-
-/* mux->shutw() modes */
-enum co_shw_mode {
-	CO_SHW_NORMAL       = 0,           /* regular write shutdown */
-	CO_SHW_SILENT       = 1,           /* imminent close, don't notify peer */
+	CO_SFL_LAST_DATA   = 0x0003,    /* Sent data are the last ones, shutdown is pending */
 };
 
 /* known transport layers (for ease of lookup) */
@@ -338,6 +323,8 @@ enum mux_ctl_type {
 	MUX_CTL_REVERSE_CONN, /* Notify about an active reverse connection accepted. */
 	MUX_CTL_SUBS_RECV, /* Notify the mux it must wait for read events again  */
 	MUX_CTL_GET_GLITCHES, /* returns number of glitches on the connection */
+	MUX_CTL_GET_NBSTRM, /* Return the current number of streams on the connection */
+	MUX_CTL_GET_MAXSTRM, /* Return the max number of streams supported by the connection */
 };
 
 /* sctl command used by mux->sctl() */
@@ -369,16 +356,6 @@ struct socks4_request {
 	char user_id[8];	/* the user ID string, variable length, terminated with a null (0x00); Using "HAProxy\0" */
 };
 
-/* Describes a set of subscriptions. Multiple events may be registered at the
- * same time. The callee should assume everything not pending for completion is
- * implicitly possible. It's illegal to change the tasklet if events are still
- * registered.
- */
-struct wait_event {
-	struct tasklet *tasklet;
-	int events;             /* set of enum sub_event_type above */
-};
-
 /* A connection handle is how we differentiate two connections on the lower
  * layers. It usually is a file descriptor but can be a connection id. The
  * CO_FL_FDLESS flag indicates which one is relevant.
@@ -408,7 +385,7 @@ struct xprt_ops {
 	int  (*prepare_srv)(struct server *srv);    /* prepare a server context */
 	void (*destroy_srv)(struct server *srv);    /* destroy a server context */
 	int  (*get_alpn)(const struct connection *conn, void *xprt_ctx, const char **str, int *len); /* get application layer name */
-	int (*takeover)(struct connection *conn, void *xprt_ctx, int orig_tid); /* Let the xprt know the fd have been taken over */
+	int (*takeover)(struct connection *conn, void *xprt_ctx, int orig_tid, int release); /* Let the xprt know the fd have been taken over */
 	void (*set_idle)(struct connection *conn, void *xprt_ctx); /* notify the xprt that the connection becomes idle. implies set_used. */
 	void (*set_used)(struct connection *conn, void *xprt_ctx); /* notify the xprt that the connection leaves idle. implies set_idle. */
 	char name[8];                               /* transport layer name, zero-terminated */
@@ -436,8 +413,7 @@ struct mux_ops {
 	size_t (*done_fastfwd)(struct stconn *sc); /* Callback to terminate fast data forwarding */
 	int (*fastfwd)(struct stconn *sc, unsigned int count, unsigned int flags); /* Callback to init fast data forwarding */
 	int (*resume_fastfwd)(struct stconn *sc, unsigned int flags); /* Callback to resume fast data forwarding */
-	void (*shutr)(struct stconn *sc, enum co_shr_mode);     /* shutr function */
-	void (*shutw)(struct stconn *sc, enum co_shw_mode);     /* shutw function */
+	void (*shut)(struct stconn *sc, enum se_shut_mode, struct se_abort_info *reason); /* shutdown function */
 
 	int (*attach)(struct connection *conn, struct sedesc *, struct session *sess); /* attach a stconn to an outgoing connection */
 	struct stconn *(*get_first_sc)(const struct connection *); /* retrieves any valid stconn from this connection */
@@ -453,7 +429,12 @@ struct mux_ops {
 	int (*used_streams)(struct connection *conn);  /* Returns the number of streams in use on a connection. */
 	void (*destroy)(void *ctx); /* Let the mux know one of its users left, so it may have to disappear */
 	int (*ctl)(struct connection *conn, enum mux_ctl_type mux_ctl, void *arg); /* Provides information about the mux connection */
-	int (*takeover)(struct connection *conn, int orig_tid); /* Attempts to migrate the connection to the current thread */
+
+	/* Attempts to migrate <conn> from <orig_tid> to the current thread. If
+	 * <release> is true, it will be destroyed immediately after by caller.
+	 */
+	int (*takeover)(struct connection *conn, int orig_tid, int release);
+
 	unsigned int flags;                           /* some flags characterizing the mux's capabilities (MX_FL_*) */
 	char name[8];                                 /* mux layer name, zero-terminated */
 };
@@ -492,14 +473,15 @@ struct conn_src {
  * CAUTION! Always update CONN_HASH_PARAMS_TYPE_COUNT when adding a new entry.
  */
 enum conn_hash_params_t {
-	CONN_HASH_PARAMS_TYPE_SNI      = 0x1,
+	CONN_HASH_PARAMS_TYPE_NAME     = 0x1,
 	CONN_HASH_PARAMS_TYPE_DST_ADDR = 0x2,
 	CONN_HASH_PARAMS_TYPE_DST_PORT = 0x4,
 	CONN_HASH_PARAMS_TYPE_SRC_ADDR = 0x8,
 	CONN_HASH_PARAMS_TYPE_SRC_PORT = 0x10,
 	CONN_HASH_PARAMS_TYPE_PROXY    = 0x20,
+	CONN_HASH_PARAMS_TYPE_MARK_TOS = 0x40,
 };
-#define CONN_HASH_PARAMS_TYPE_COUNT 6
+#define CONN_HASH_PARAMS_TYPE_COUNT 7
 
 #define CONN_HASH_PAYLOAD_LEN \
 	(((sizeof(((struct conn_hash_node *)0)->node.key)) * 8) - CONN_HASH_PARAMS_TYPE_COUNT)
@@ -512,8 +494,9 @@ enum conn_hash_params_t {
  * connection hash.
  */
 struct conn_hash_params {
-	uint64_t sni_prehash;
+	uint64_t name_prehash;
 	uint64_t proxy_prehash;
+	uint64_t mark_tos_prehash;
 	void *target;
 	struct sockaddr_storage *src_addr;
 	struct sockaddr_storage *dst_addr;
@@ -560,7 +543,7 @@ struct connection {
 		struct mt_list toremove_list; /* list element when idle connection is ready to be purged */
 	};
 	union {
-		struct list session_list;  /* used by backend conns, list of attached connections to a session */
+		struct list sess_el;       /* used by private backend conns, list elem into session */
 		struct list stopping_list; /* used by frontend conns, attach point in mux stopping list */
 	};
 	union conn_handle handle;     /* connection handle at the socket layer */
@@ -582,6 +565,8 @@ struct connection {
 		enum obj_type *target; /* Listener for active reverse, server for passive. */
 		struct buffer name;    /* Only used for passive reverse. Used as SNI when connection added to server idle pool. */
 	} reverse;
+	uint32_t mark;                 /* set network mark, if CO_FL_OPT_MARK is set */
+	uint8_t tos;                   /* set ip tos, if CO_FL_OPT_TOS is set */
 };
 
 /* node for backend connection in the idle trees for http-reuse

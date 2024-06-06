@@ -55,7 +55,7 @@ int frontend_accept(struct stream *s)
 
 	if ((fe->mode == PR_MODE_TCP || fe->mode == PR_MODE_HTTP)
 	    && (!LIST_ISEMPTY(&fe->loggers))) {
-		if (likely(!LIST_ISEMPTY(&fe->logformat))) {
+		if (likely(!lf_expr_isempty(&fe->logformat))) {
 			/* we have the client ip */
 			if (s->logs.logwait & LW_CLIP)
 				if (!(s->logs.logwait &= ~(LW_CLIP|LW_INIT)))
@@ -252,7 +252,7 @@ smp_fetch_fe_req_rate(const struct arg *args, struct sample *smp, const char *kw
 
 	smp->flags = SMP_F_VOL_TEST;
 	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = read_freq_ctr(&px->fe_req_per_sec);
+	smp->data.u.sint = read_freq_ctr(&px->fe_counters.req_per_sec);
 	return 1;
 }
 
@@ -272,7 +272,7 @@ smp_fetch_fe_sess_rate(const struct arg *args, struct sample *smp, const char *k
 
 	smp->flags = SMP_F_VOL_TEST;
 	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = read_freq_ctr(&px->fe_sess_per_sec);
+	smp->data.u.sint = read_freq_ctr(&px->fe_counters.sess_per_sec);
 	return 1;
 }
 

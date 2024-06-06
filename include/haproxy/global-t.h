@@ -46,7 +46,7 @@
 #define	MODE_DUMP_NB_L  0x10000 /* dump line numbers when the configuration file is dump */
 
 /* list of last checks to perform, depending on config options */
-#define LSTCHK_CAP_BIND	0x00000001	/* check that we can bind to any port */
+#define LSTCHK_SYSADM	0x00000001	/* check that we have CAP_SYS_ADMIN */
 #define LSTCHK_NETADM	0x00000002	/* check that we have CAP_NET_ADMIN */
 
 /* Global tuning options */
@@ -84,6 +84,7 @@
 #define GTUNE_LISTENER_MQ_FAIR   (1<<27)
 #define GTUNE_LISTENER_MQ_OPT    (1<<28)
 #define GTUNE_LISTENER_MQ_ANY    (GTUNE_LISTENER_MQ_FAIR | GTUNE_LISTENER_MQ_OPT)
+#define GTUNE_QUIC_CC_HYSTART    (1<<29)
 
 #define NO_ZERO_COPY_FWD             0x0001 /* Globally disable zero-copy FF */
 #define NO_ZERO_COPY_FWD_PT          0x0002 /* disable zero-copy FF for PT (recv & send are disabled automatically) */
@@ -95,7 +96,7 @@
 #define NO_ZERO_COPY_FWD_QUIC_SND    0x0080 /* disable zero-copy FF for QUIC on send */
 #define NO_ZERO_COPY_FWD_FCGI_RCV    0x0100 /* disable zero-copy FF for FCGI on received */
 #define NO_ZERO_COPY_FWD_FCGI_SND    0x0200 /* disable zero-copy FF for FCGI on send */
-#define NO_ZERO_COPY_FWD_CACHE       0x0400 /* disable zero-copy FF for cache applet */
+#define NO_ZERO_COPY_FWD_APPLET      0x0400 /* disable zero-copy FF for applets */
 
 
 extern int cluster_secret_isset; /* non zero means a cluster secret was initialized */
@@ -154,6 +155,7 @@ struct global {
 	char *log_send_hostname;   /* set hostname in syslog header */
 	char *server_state_base;   /* path to a directory where server state files can be found */
 	char *server_state_file;   /* path to the file where server states are loaded from */
+	char *stats_file;          /* path to stats-file */
 	unsigned char cluster_secret[16]; /* 128 bits of an SHA1 digest of a secret defined as ASCII string */
 	struct {
 		int maxpollevents; /* max number of poll events at once */
@@ -190,11 +192,14 @@ struct global {
 		int nb_stk_ctr;       /* number of stick counters, defaults to MAX_SESS_STKCTR */
 		int default_shards; /* default shards for listeners, or -1 (by-thread) or -2 (by-group) */
 		uint max_checks_per_thread; /* if >0, no more than this concurrent checks per thread */
+		uint ring_queues;   /* if >0, #ring queues, otherwise equals #thread groups */
 #ifdef USE_QUIC
 		unsigned int quic_backend_max_idle_timeout;
 		unsigned int quic_frontend_max_idle_timeout;
+		unsigned int quic_frontend_glitches_threshold;
 		unsigned int quic_frontend_max_streams_bidi;
 		unsigned int quic_retry_threshold;
+		unsigned int quic_reorder_ratio;
 		unsigned int quic_streams_buf;
 		unsigned int quic_max_frame_loss;
 #endif /* USE_QUIC */
@@ -209,7 +214,10 @@ struct global {
 	} unix_bind;
 	struct proxy *cli_fe;           /* the frontend holding the stats settings */
 	int numa_cpu_mapping;
+	int thread_limit;               /* hard limit on the number of threads */
 	int prealloc_fd;
+	uchar clt_privileged_ports;     /* bitmask to allow client privileged ports exchanges per protocol */
+	/* 3-bytes hole */
 	int cfg_curr_line;              /* line number currently being parsed */
 	const char *cfg_curr_file;      /* config file currently being parsed or NULL */
 	char *cfg_curr_section;         /* config section name currently being parsed or NULL */

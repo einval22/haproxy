@@ -22,6 +22,8 @@
 #ifndef _HAPROXY_DEFAULTS_H
 #define _HAPROXY_DEFAULTS_H
 
+#include <haproxy/compat.h>
+
 /* MAX_THREADS defines the highest limit for the global nbthread value. It
  * defaults to the number of bits in a long integer when threads are enabled
  * but may be lowered to save resources on embedded systems.
@@ -69,18 +71,9 @@
 #define BUFSIZE	        16384
 #endif
 
-/* certain buffers may only be allocated for responses in order to avoid
- * deadlocks caused by request queuing. 2 buffers is the absolute minimum
- * acceptable to ensure that a request gaining access to a server can get
- * a response buffer even if it doesn't completely flush the request buffer.
- * The worst case is an applet making use of a request buffer that cannot
- * completely be sent while the server starts to respond, and all unreserved
- * buffers are allocated by request buffers from pending connections in the
- * queue waiting for this one to flush. Both buffers reserved buffers may
- * thus be used at the same time.
- */
+// number of per-thread emergency buffers for low-memory conditions
 #ifndef RESERVED_BUFS
-#define RESERVED_BUFS   2
+#define RESERVED_BUFS   4
 #endif
 
 // reserved buffer space for header rewriting
@@ -478,6 +471,10 @@
 
 #define CONFIG_HAP_POOL_BUCKETS (1UL << (CONFIG_HAP_POOL_BUCKETS_BITS))
 
+#ifndef CONFIG_HAP_TBL_BUCKETS
+# define CONFIG_HAP_TBL_BUCKETS CONFIG_HAP_POOL_BUCKETS
+#endif
+
 /* Number of samples used to compute the times reported in stats. A power of
  * two is highly recommended, and this value multiplied by the largest response
  * time must not overflow and unsigned int. See freq_ctr.h for more information.
@@ -528,6 +525,35 @@
 # else
 #  define CACHE_TREE_NUM 1
 # endif
+#endif
+
+/* number of ring wait queues depending on the number
+ * of threads.
+ */
+#ifndef RING_WAIT_QUEUES
+# if defined(USE_THREAD) && MAX_THREADS >= 32
+#  define RING_WAIT_QUEUES   16
+# elif defined(USE_THREAD)
+#  define RING_WAIT_QUEUES ((MAX_THREADS + 1) / 2)
+# else
+#  define RING_WAIT_QUEUES 1
+# endif
+#endif
+
+/* it has been found that 6 queues was optimal on various archs at various
+ * thread counts, so let's use that by default.
+ */
+#ifndef RING_DFLT_QUEUES
+# define RING_DFLT_QUEUES   6
+#endif
+
+/* Let's make DEBUG_STRICT default to 1 to get rid of it in the makefile */
+#ifndef DEBUG_STRICT
+# define DEBUG_STRICT 1
+#endif
+
+#if !defined(DEBUG_MEMORY_POOLS)
+# define DEBUG_MEMORY_POOLS 1
 #endif
 
 #endif /* _HAPROXY_DEFAULTS_H */

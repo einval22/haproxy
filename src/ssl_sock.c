@@ -136,9 +136,12 @@ struct global_ssl global_ssl = {
 #ifdef HAVE_SSL_KEYLOG
 	.keylog = 0,
 #endif
+	.security_level = -1,
 #ifndef OPENSSL_NO_OCSP
 	.ocsp_update.delay_max = SSL_OCSP_UPDATE_DELAY_MAX,
 	.ocsp_update.delay_min = SSL_OCSP_UPDATE_DELAY_MIN,
+	.ocsp_update.mode = SSL_SOCK_OCSP_UPDATE_OFF,
+	.ocsp_update.disable = 0,
 #endif
 };
 
@@ -157,7 +160,7 @@ enum {
 	SSL_ST_STATS_COUNT /* must be the last member of the enum */
 };
 
-static struct name_desc ssl_stats[] = {
+static struct stat_col ssl_stats[] = {
 	[SSL_ST_SESS]             = { .name = "ssl_sess",
 	                              .desc = "Total number of ssl sessions established" },
 	[SSL_ST_REUSED_SESS]      = { .name = "ssl_reused_sess",
@@ -172,13 +175,37 @@ static struct ssl_counters {
 	long long failed_handshake;
 } ssl_counters;
 
-static void ssl_fill_stats(void *data, struct field *stats)
+static int ssl_fill_stats(void *data, struct field *stats, unsigned int *selected_field)
 {
 	struct ssl_counters *counters = data;
+	unsigned int current_field = (selected_field != NULL ? *selected_field : 0);
 
-	stats[SSL_ST_SESS]             = mkf_u64(FN_COUNTER, counters->sess);
-	stats[SSL_ST_REUSED_SESS]      = mkf_u64(FN_COUNTER, counters->reused_sess);
-	stats[SSL_ST_FAILED_HANDSHAKE] = mkf_u64(FN_COUNTER, counters->failed_handshake);
+	for (; current_field < SSL_ST_STATS_COUNT; current_field++) {
+		struct field metric = { 0 };
+
+		switch (current_field) {
+		case SSL_ST_SESS:
+			metric = mkf_u64(FN_COUNTER, counters->sess);
+			break;
+		case SSL_ST_REUSED_SESS:
+			metric = mkf_u64(FN_COUNTER, counters->reused_sess);
+			break;
+		case SSL_ST_FAILED_HANDSHAKE:
+			metric = mkf_u64(FN_COUNTER, counters->failed_handshake);
+			break;
+		default:
+			/* not used for frontends. If a specific metric
+			 * is requested, return an error. Otherwise continue.
+			 */
+			if (selected_field != NULL)
+				return 0;
+			continue;
+		}
+		stats[current_field] = metric;
+		if (selected_field != NULL)
+			break;
+	}
+	return 1;
 }
 
 static struct stats_module ssl_stats_module = {
@@ -1080,40 +1107,40 @@ static int tlskeys_finalize_config(void)
  * Returns 1 if no ".ocsp" file found, 0 if OCSP status extension is
  * successfully enabled, or -1 in other error case.
  */
-static int ssl_sock_load_ocsp(const char *path, SSL_CTX *ctx, struct ckch_data *data, STACK_OF(X509) *chain)
+static int ssl_sock_load_ocsp(const char *path, SSL_CTX *ctx, struct ckch_store *store, STACK_OF(X509) *chain)
 {
+	struct ckch_data *data = store->data;
 	X509 *x, *issuer;
 	int i, ret = -1;
 	struct certificate_ocsp *ocsp = NULL, *iocsp;
 	char *warn = NULL;
 	unsigned char *p;
-#ifndef USE_OPENSSL_WOLFSSL
-#if (HA_OPENSSL_VERSION_NUMBER >= 0x10101000L)
-    int (*callback) (SSL *, void *);
+#ifdef USE_OPENSSL_WOLFSSL
+	/* typedef int(*tlsextStatusCb)(WOLFSSL* ssl, void*); */
+	tlsextStatusCb callback = NULL;
+#elif (HA_OPENSSL_VERSION_NUMBER >= 0x10101000L)
+	int (*callback) (SSL *, void *) = NULL;
 #else
-	void (*callback) (void);
-#endif
-#else
-	tlsextStatusCb callback;
+	void (*callback) (void) = NULL;
 #endif
 	struct buffer *ocsp_uri = get_trash_chunk();
 	char *err = NULL;
 	size_t path_len;
+	int inc_refcount_store = 0;
+	int enable_auto_update = (store->conf.ocsp_update_mode == SSL_SOCK_OCSP_UPDATE_ON) ||
+	                         (store->conf.ocsp_update_mode == SSL_SOCK_OCSP_UPDATE_DFLT &&
+	                          global_ssl.ocsp_update.mode == SSL_SOCK_OCSP_UPDATE_ON);
 
 	x = data->cert;
 	if (!x)
 		goto out;
 
 	ssl_ocsp_get_uri_from_cert(x, ocsp_uri, &err);
-	/* We should have an "OCSP URI" field in order for auto update to work. */
-	if (data->ocsp_update_mode == SSL_SOCK_OCSP_UPDATE_ON && b_data(ocsp_uri) == 0)
-		goto out;
-
-	/* In case of ocsp update mode set to 'on', this function might be
-	 * called with no known ocsp response. If no ocsp uri can be found in
-	 * the certificate, nothing needs to be done here. */
 	if (!data->ocsp_response && !data->ocsp_cid) {
-		if (data->ocsp_update_mode != SSL_SOCK_OCSP_UPDATE_ON || b_data(ocsp_uri) == 0) {
+		/* In case of ocsp update mode set to 'on', this function might
+		 * be called with no known ocsp response. If no ocsp uri can be
+		 * found in the certificate, nothing needs to be done here. */
+		if (!enable_auto_update || b_data(ocsp_uri) == 0) {
 			ret = 0;
 			goto out;
 		}
@@ -1134,8 +1161,10 @@ static int ssl_sock_load_ocsp(const char *path, SSL_CTX *ctx, struct ckch_data *
 	if (!issuer)
 		goto out;
 
-	if (!data->ocsp_cid)
+	if (!data->ocsp_cid) {
 		data->ocsp_cid = OCSP_cert_to_id(0, x, issuer);
+		inc_refcount_store = 1;
+	}
 	if (!data->ocsp_cid)
 		goto out;
 
@@ -1156,11 +1185,10 @@ static int ssl_sock_load_ocsp(const char *path, SSL_CTX *ctx, struct ckch_data *
 	if (iocsp == ocsp)
 		ocsp = NULL;
 
-#ifndef SSL_CTX_get_tlsext_status_cb
-# define SSL_CTX_get_tlsext_status_cb(ctx, cb) \
-	*cb = (void (*) (void))ctx->tlsext_status_cb;
-#endif
 	SSL_CTX_get_tlsext_status_cb(ctx, &callback);
+
+	if (inc_refcount_store)
+		iocsp->refcount_store++;
 
 	if (!callback) {
 		struct ocsp_cbk_arg *cb_arg;
@@ -1253,7 +1281,26 @@ static int ssl_sock_load_ocsp(const char *path, SSL_CTX *ctx, struct ckch_data *
 		 */
 		memcpy(iocsp->path, path, path_len + 1);
 
-		if (data->ocsp_update_mode == SSL_SOCK_OCSP_UPDATE_ON) {
+		if (enable_auto_update) {
+			ssl_ocsp_update_insert(iocsp);
+			/* If we are during init the update task is not
+			 * scheduled yet so a wakeup won't do anything.
+			 * Otherwise, if the OCSP was added through the CLI, we
+			 * wake the task up to manage the case of a new entry
+			 * that needs to be updated before the previous first
+			 * entry.
+			 */
+			if (ocsp_update_task)
+				task_wakeup(ocsp_update_task, TASK_WOKEN_MSG);
+		}
+	} else if (iocsp->uri && enable_auto_update) {
+		/* This unlikely case can happen if a series of "del ssl
+		 * crt-list" / "add ssl crt-list" commands are made on the CLI.
+		 * In such a case, the OCSP response tree entry will be created
+		 * prior to the activation of the ocsp auto update and in such a
+		 * case we must "force" insertion in the auto update tree.
+		 */
+		if (iocsp->next_update.node.leaf_p == NULL) {
 			ssl_ocsp_update_insert(iocsp);
 			/* If we are during init the update task is not
 			 * scheduled yet so a wakeup won't do anything.
@@ -2221,10 +2268,14 @@ int ssl_sock_switchctx_cbk(SSL *ssl, int *al, void *arg)
 	}
 	if (has_ecdsa_sig) {  /* in very rare case: has ecdsa sign but not a ECDSA cipher */
 		const SSL_CIPHER *cipher;
+		STACK_OF(SSL_CIPHER) *ha_ciphers; /* haproxy side ciphers */
 		uint32_t cipher_id;
 		size_t len;
 		const uint8_t *cipher_suites;
+
+		ha_ciphers = SSL_get_ciphers(ssl);
 		has_ecdsa_sig = 0;
+
 #ifdef OPENSSL_IS_BORINGSSL
 		len = ctx->cipher_suites_len;
 		cipher_suites = ctx->cipher_suites;
@@ -2241,6 +2292,10 @@ int ssl_sock_switchctx_cbk(SSL *ssl, int *al, void *arg)
 			cipher = SSL_CIPHER_find(ssl, cipher_suites);
 #endif
 			if (!cipher)
+				continue;
+
+			/* check if this cipher is available in haproxy configuration */
+			if (sk_SSL_CIPHER_find(ha_ciphers, cipher) == -1)
 				continue;
 
 			cipher_id = SSL_CIPHER_get_id(cipher);
@@ -3265,9 +3320,10 @@ end:
  * The value 0 means there is no error nor warning and
  * the operation succeed.
  */
-static int ssl_sock_put_ckch_into_ctx(const char *path, struct ckch_data *data, SSL_CTX *ctx, char **err)
+static int ssl_sock_put_ckch_into_ctx(const char *path, struct ckch_store *store, SSL_CTX *ctx, char **err)
 {
 	int errcode = 0;
+	struct ckch_data *data = store->data;
 	STACK_OF(X509) *find_chain = NULL;
 
 	ERR_clear_error();
@@ -3319,12 +3375,12 @@ static int ssl_sock_put_ckch_into_ctx(const char *path, struct ckch_data *data, 
 	 * ocsp tree even if no ocsp_response was known during init, unless the
 	 * frontend's conf disables ocsp update explicitly.
 	 */
-	if (ssl_sock_load_ocsp(path, ctx, data, find_chain) < 0) {
+	if (ssl_sock_load_ocsp(path, ctx, store, find_chain) < 0) {
 		if (data->ocsp_response)
 			memprintf(err, "%s '%s.ocsp' is present and activates OCSP but it is impossible to compute the OCSP certificate ID (maybe the issuer could not be found)'.\n",
 				  err && *err ? *err : "", path);
 		else
-			memprintf(err, "%s '%s' has an OCSP URI and OCSP auto-update is set to 'on' but an error occurred (maybe the issuer could not be found)'.\n",
+			memprintf(err, "%s '%s' has an OCSP auto-update set to 'on' but an error occurred (maybe the OCSP URI or the issuer could not be found)'.\n",
 				  err && *err ? *err : "", path);
 		errcode |= ERR_ALERT | ERR_FATAL;
 		goto end;
@@ -3415,7 +3471,10 @@ int ckch_inst_new_load_store(const char *path, struct ckch_store *ckchs, struct 
 		goto error;
 	}
 
-	errcode |= ssl_sock_put_ckch_into_ctx(path, data, ctx, err);
+	if (global_ssl.security_level > -1)
+		SSL_CTX_set_security_level(ctx, global_ssl.security_level);
+
+	errcode |= ssl_sock_put_ckch_into_ctx(path, ckchs, ctx, err);
 	if (errcode & ERR_CODE)
 		goto error;
 
@@ -3568,6 +3627,9 @@ int ckch_inst_new_load_srv_store(const char *path, struct ckch_store *ckchs,
 		errcode |= ERR_ALERT | ERR_FATAL;
 		goto error;
 	}
+
+	if (global_ssl.security_level > -1)
+		SSL_CTX_set_security_level(ctx, global_ssl.security_level);
 
 	errcode |= ssl_sock_put_srv_ckch_into_ctx(path, data, ctx, err);
 	if (errcode & ERR_CODE)
@@ -3784,13 +3846,21 @@ int ssl_sock_load_cert(char *path, struct bind_conf *bind_conf, int is_default, 
 	}
 
 	if ((ckchs = ckchs_lookup(path))) {
+
+		cfgerr |= ckch_conf_cmp_empty(&ckchs->conf, err);
+		if (cfgerr & ERR_CODE) {
+			memprintf(err, "Can't load '%s', is already defined with incompatible parameters:\n %s", path, err ? *err : "");
+			return cfgerr;
+		}
+
 		/* we found the ckchs in the tree, we can use it directly */
 		 cfgerr |= ssl_sock_load_ckchs(path, ckchs, bind_conf, NULL, NULL, 0, is_default, &ckch_inst, err);
+
 		 found++;
 	} else if (stat(path, &buf) == 0) {
 		found++;
 		if (S_ISDIR(buf.st_mode) == 0) {
-			ckchs =  ckchs_load_cert_file(path, err);
+			ckchs = ckch_store_new_load_files_path(path, err);
 			if (!ckchs)
 				cfgerr |= ERR_ALERT | ERR_FATAL;
 			cfgerr |= ssl_sock_load_ckchs(path, ckchs, bind_conf, NULL, NULL, 0, is_default, &ckch_inst, err);
@@ -3818,7 +3888,7 @@ int ssl_sock_load_cert(char *path, struct bind_conf *bind_conf, int is_default, 
 				} else {
 					if (stat(fp, &buf) == 0) {
 						found++;
-						ckchs =  ckchs_load_cert_file(fp, err);
+						ckchs =  ckch_store_new_load_files_path(fp, err);
 						if (!ckchs)
 							cfgerr |= ERR_ALERT | ERR_FATAL;
 						cfgerr |= ssl_sock_load_ckchs(fp, ckchs, bind_conf, NULL, NULL, 0, is_default, &ckch_inst, err);
@@ -3871,7 +3941,7 @@ int ssl_sock_load_srv_cert(char *path, struct server *server, int create_if_none
 			/* We do not manage directories on backend side. */
 			if (S_ISDIR(buf.st_mode) == 0) {
 				++found;
-				ckchs =  ckchs_load_cert_file(path, err);
+				ckchs = ckch_store_new_load_files_path(path, err);
 				if (!ckchs)
 					cfgerr |= ERR_ALERT | ERR_FATAL;
 				cfgerr |= ssl_sock_load_srv_ckchs(path, ckchs, server, &server->ssl_ctx.inst, err);
@@ -3915,6 +3985,9 @@ ssl_sock_initial_ctx(struct bind_conf *bind_conf)
 
 	ctx = SSL_CTX_new(SSLv23_server_method());
 	bind_conf->initial_ctx = ctx;
+
+	if (global_ssl.security_level > -1)
+		SSL_CTX_set_security_level(ctx, global_ssl.security_level);
 
 	if (conf_ssl_methods->flags && (conf_ssl_methods->min || conf_ssl_methods->max))
 		ha_warning("Proxy '%s': no-sslv3/no-tlsv1x are ignored for bind '%s' at [%s:%d]. "
@@ -4912,6 +4985,8 @@ int ssl_sock_prepare_srv_ctx(struct server *srv)
 			cfgerr++;
 			return cfgerr;
 		}
+		if (global_ssl.security_level > -1)
+			SSL_CTX_set_security_level(ctx, global_ssl.security_level);
 
 		srv->ssl_ctx.ctx = ctx;
 	}
@@ -5070,6 +5145,16 @@ static int ssl_sock_prepare_srv_ssl_ctx(const struct server *srv, SSL_CTX *ctx)
 			 srv->ssl_ctx.ciphers);
 		cfgerr++;
 	}
+
+#ifdef SSL_CTRL_SET_MSG_CALLBACK
+	SSL_CTX_set_msg_callback(ctx, ssl_sock_msgcbk);
+#endif
+
+#ifdef HAVE_SSL_KEYLOG
+	/* only activate the keylog callback if it was required to prevent performance loss */
+	if (global_ssl.keylog > 0)
+		SSL_CTX_set_keylog_callback(ctx, SSL_CTX_keylog);
+#endif
 
 #ifdef HAVE_SSL_CTX_SET_CIPHERSUITES
 	if (srv->ssl_ctx.ciphersuites &&
@@ -5268,7 +5353,7 @@ int ssl_sock_prepare_bind_conf(struct bind_conf *bind_conf)
 	if (!ssl_shctx && global.tune.sslcachesize) {
 		alloc_ctx = shctx_init(&ssl_shctx, global.tune.sslcachesize,
 		                       sizeof(struct sh_ssl_sess_hdr) + SHSESS_BLOCK_MIN_SIZE, -1,
-		                       sizeof(*sh_ssl_sess_tree));
+		                       sizeof(*sh_ssl_sess_tree), "ssl cache");
 		if (alloc_ctx <= 0) {
 			if (alloc_ctx == SHCTX_E_INIT_LOCK)
 				ha_alert("Unable to initialize the lock for the shared SSL session cache. You can retry using the global statement 'tune.ssl.force-private-cache' but it could increase CPU usage due to renegotiations if nbproc > 1.\n");
@@ -5634,7 +5719,7 @@ static int ssl_sock_init(struct connection *conn, void **xprt_ctx)
 
 #ifdef SSL_READ_EARLY_DATA_SUCCESS
 		if (bc->ssl_conf.early_data) {
-			b_alloc(&ctx->early_buf);
+			b_alloc(&ctx->early_buf, DB_MUX_RX);
 			SSL_set_max_early_data(ctx->ssl,
 			    /* Only allow early data if we managed to allocate
 			     * a buffer.
@@ -6090,19 +6175,26 @@ static int ssl_unsubscribe(struct connection *conn, void *xprt_ctx, int event_ty
  * It should be called with the takeover lock for the old thread held.
  * Returns 0 on success, and -1 on failure
  */
-static int ssl_takeover(struct connection *conn, void *xprt_ctx, int orig_tid)
+static int ssl_takeover(struct connection *conn, void *xprt_ctx, int orig_tid, int release)
 {
 	struct ssl_sock_ctx *ctx = xprt_ctx;
-	struct tasklet *tl = tasklet_new();
+	struct tasklet *tl = NULL;
 
-	if (!tl)
-		return -1;
+	if (!release) {
+		tl = tasklet_new();
+		if (!tl)
+			return -1;
+	}
 
 	ctx->wait_event.tasklet->context = NULL;
 	tasklet_wakeup_on(ctx->wait_event.tasklet, orig_tid);
+
 	ctx->wait_event.tasklet = tl;
-	ctx->wait_event.tasklet->process = ssl_sock_io_cb;
-	ctx->wait_event.tasklet->context = ctx;
+	if (!release) {
+		ctx->wait_event.tasklet->process = ssl_sock_io_cb;
+		ctx->wait_event.tasklet->context = ctx;
+	}
+
 	return 0;
 }
 
@@ -6132,7 +6224,7 @@ static void ssl_set_used(struct connection *conn, void *xprt_ctx)
 	if (!ctx || !ctx->wait_event.tasklet)
 		return;
 
-	HA_ATOMIC_OR(&ctx->wait_event.tasklet->state, TASK_F_USR1);
+	HA_ATOMIC_AND(&ctx->wait_event.tasklet->state, ~TASK_F_USR1);
 	if (ctx->xprt)
 		xprt_set_used(conn, ctx->xprt, ctx->xprt_ctx);
 }
@@ -7447,6 +7539,8 @@ static void __ssl_sock_init(void)
 	xprt_register(XPRT_SSL, &ssl_sock);
 #if HA_OPENSSL_VERSION_NUMBER < 0x10100000L
 	SSL_library_init();
+#elif HA_OPENSSL_VERSION_NUMBER >= 0x10100000L
+	OPENSSL_init_ssl(0, NULL);
 #endif
 #if (!defined(OPENSSL_NO_COMP) && !defined(SSL_OP_NO_COMPRESSION))
 	cm = SSL_COMP_get_compression_methods();

@@ -53,7 +53,7 @@ static int class_stktable_ref;
 static int class_proxy_list_ref;
 static int class_server_list_ref;
 
-#define STATS_LEN (MAX((int)ST_F_TOTAL_FIELDS, (int)INF_TOTAL_FIELDS))
+#define STATS_LEN (MAX((int)ST_I_PX_MAX, (int)ST_I_INF_MAX))
 
 static THREAD_LOCAL struct field stats[STATS_LEN];
 
@@ -377,8 +377,8 @@ static int hlua_get_info(lua_State *L)
 	stats_fill_info(stats, STATS_LEN, 0);
 
 	lua_newtable(L);
-	for (i=0; i<INF_TOTAL_FIELDS; i++) {
-		lua_pushstring(L, info_fields[i].name);
+	for (i=0; i<ST_I_INF_MAX; i++) {
+		lua_pushstring(L, stat_cols_info[i].name);
 		hlua_fcn_pushfield(L, &stats[i]);
 		lua_settable(L, -3);
 	}
@@ -982,6 +982,7 @@ int hlua_stktable_dump(lua_State *L)
 	int i;
 	int skip_entry;
 	void *ptr;
+	int shard = 0; // FIXME: this should be stored in the context and iterate to scan the table
 
 	t = hlua_check_stktable(L, 1);
 	type = lua_type(L, 2);
@@ -1042,16 +1043,17 @@ int hlua_stktable_dump(lua_State *L)
 
 	lua_newtable(L);
 
-	HA_RWLOCK_WRLOCK(STK_TABLE_LOCK, &t->lock);
-	eb = ebmb_first(&t->keys);
+ next_shard:
+	HA_RWLOCK_WRLOCK(STK_TABLE_LOCK, &t->shards[shard].sh_lock);
+	eb = ebmb_first(&t->shards[shard].keys);
 	for (n = eb; n; n = ebmb_next(n)) {
 		ts = ebmb_entry(n, struct stksess, key);
 		if (!ts) {
-			HA_RWLOCK_WRUNLOCK(STK_TABLE_LOCK, &t->lock);
-			return 1;
+			HA_RWLOCK_WRUNLOCK(STK_TABLE_LOCK, &t->shards[shard].sh_lock);
+			goto done;
 		}
 		HA_ATOMIC_INC(&ts->ref_cnt);
-		HA_RWLOCK_WRUNLOCK(STK_TABLE_LOCK, &t->lock);
+		HA_RWLOCK_WRUNLOCK(STK_TABLE_LOCK, &t->shards[shard].sh_lock);
 
 		/* multi condition/value filter */
 		skip_entry = 0;
@@ -1090,7 +1092,7 @@ int hlua_stktable_dump(lua_State *L)
 		}
 
 		if (skip_entry) {
-			HA_RWLOCK_WRLOCK(STK_TABLE_LOCK, &t->lock);
+			HA_RWLOCK_WRLOCK(STK_TABLE_LOCK, &t->shards[shard].sh_lock);
 			HA_ATOMIC_DEC(&ts->ref_cnt);
 			continue;
 		}
@@ -1114,10 +1116,14 @@ int hlua_stktable_dump(lua_State *L)
 		lua_newtable(L);
 		hlua_stktable_entry(L, t, ts);
 		lua_settable(L, -3);
-		HA_RWLOCK_WRLOCK(STK_TABLE_LOCK, &t->lock);
+		HA_RWLOCK_WRLOCK(STK_TABLE_LOCK, &t->shards[shard].sh_lock);
 		HA_ATOMIC_DEC(&ts->ref_cnt);
 	}
-	HA_RWLOCK_WRUNLOCK(STK_TABLE_LOCK, &t->lock);
+	HA_RWLOCK_WRUNLOCK(STK_TABLE_LOCK, &t->shards[shard].sh_lock);
+ done:
+	shard++;
+	if (shard < CONFIG_HAP_TBL_BUCKETS)
+		goto next_shard;
 
 	return 1;
 }
@@ -1152,12 +1158,12 @@ int hlua_listener_get_stats(lua_State *L)
 		return 1;
 	}
 
-	stats_fill_li_stats(li->bind_conf->frontend, li, STAT_SHLGNDS, stats,
-			    STATS_LEN, NULL);
+	stats_fill_li_line(li->bind_conf->frontend, li, STAT_F_SHLGNDS, stats,
+	                   STATS_LEN, NULL);
 
 	lua_newtable(L);
-	for (i=0; i<ST_F_TOTAL_FIELDS; i++) {
-		lua_pushstring(L, stat_fields[i].name);
+	for (i=0; i<ST_I_PX_MAX; i++) {
+		lua_pushstring(L, stat_cols_px[i].name);
 		hlua_fcn_pushfield(L, &stats[i]);
 		lua_settable(L, -3);
 	}
@@ -1198,12 +1204,12 @@ int hlua_server_get_stats(lua_State *L)
 		return 1;
 	}
 
-	stats_fill_sv_stats(srv->proxy, srv, STAT_SHLGNDS, stats,
-			    STATS_LEN, NULL);
+	stats_fill_sv_line(srv->proxy, srv, STAT_F_SHLGNDS, stats,
+	                   STATS_LEN, NULL);
 
 	lua_newtable(L);
-	for (i=0; i<ST_F_TOTAL_FIELDS; i++) {
-		lua_pushstring(L, stat_fields[i].name);
+	for (i=0; i<ST_I_PX_MAX; i++) {
+		lua_pushstring(L, stat_cols_px[i].name);
 		hlua_fcn_pushfield(L, &stats[i]);
 		lua_settable(L, -3);
 	}
@@ -1329,14 +1335,14 @@ static int hlua_server_index(struct lua_State *L)
 {
 	const char *key = lua_tostring(L, 2);
 
-	if (!strcmp(key, "name")) {
+	if (strcmp(key, "name") == 0) {
 		if (ONLY_ONCE())
 			ha_warning("hlua: use of server 'name' attribute is deprecated and will eventually be removed, please use get_name() function instead: %s\n", hlua_traceback(L, ", "));
 		lua_pushvalue(L, 1);
 		hlua_server_get_name(L);
 		return 1;
 	}
-	if (!strcmp(key, "puid")) {
+	if (strcmp(key, "puid") == 0) {
 		if (ONLY_ONCE())
 			ha_warning("hlua: use of server 'puid' attribute is deprecated and will eventually be removed, please use get_puid() function instead: %s\n", hlua_traceback(L, ", "));
 		lua_pushvalue(L, 1);
@@ -1980,14 +1986,14 @@ static int hlua_proxy_index(struct lua_State *L)
 {
 	const char *key = lua_tostring(L, 2);
 
-	if (!strcmp(key, "name")) {
+	if (strcmp(key, "name") == 0) {
 		if (ONLY_ONCE())
 			ha_warning("hlua: use of proxy 'name' attribute is deprecated and will eventually be removed, please use get_name() function instead: %s\n", hlua_traceback(L, ", "));
 		lua_pushvalue(L, 1);
 		hlua_proxy_get_name(L);
 		return 1;
 	}
-	if (!strcmp(key, "uuid")) {
+	if (strcmp(key, "uuid") == 0) {
 		if (ONLY_ONCE())
 			ha_warning("hlua: use of proxy 'uuid' attribute is deprecated and will eventually be removed, please use get_uuid() function instead: %s\n", hlua_traceback(L, ", "));
 		lua_pushvalue(L, 1);
@@ -2046,12 +2052,12 @@ int hlua_proxy_get_stats(lua_State *L)
 
 	px = hlua_check_proxy(L, 1);
 	if (px->cap & PR_CAP_BE)
-		stats_fill_be_stats(px, STAT_SHLGNDS, stats, STATS_LEN, NULL);
+		stats_fill_be_line(px, STAT_F_SHLGNDS, stats, STATS_LEN, NULL);
 	else
-		stats_fill_fe_stats(px, stats, STATS_LEN, NULL);
+		stats_fill_fe_line(px, 0, stats, STATS_LEN, NULL);
 	lua_newtable(L);
-	for (i=0; i<ST_F_TOTAL_FIELDS; i++) {
-		lua_pushstring(L, stat_fields[i].name);
+	for (i=0; i<ST_I_PX_MAX; i++) {
+		lua_pushstring(L, stat_cols_px[i].name);
 		hlua_fcn_pushfield(L, &stats[i]);
 		lua_settable(L, -3);
 	}

@@ -90,11 +90,7 @@ static struct ring *startup_logs_from_fd(int fd, int new)
 	if (area == MAP_FAILED || area == NULL)
 		goto error;
 
-	if (new)
-		r = ring_make_from_area(area, STARTUP_LOG_SIZE);
-	else
-		r = ring_cast_from_area(area);
-
+        r = ring_make_from_area(area, STARTUP_LOG_SIZE, new);
 	if (r == NULL)
 		goto error;
 
@@ -116,7 +112,7 @@ error:
  * Once in wait mode, the shm must be copied and closed.
  *
  */
-void startup_logs_init()
+void startup_logs_init_shm()
 {
 	struct ring *r = NULL;
 	char *str_fd, *endptr;
@@ -180,24 +176,29 @@ error:
 
 }
 
-#else /* ! USE_SHM_OPEN */
+#endif /* ! USE_SHM_OPEN */
 
 void startup_logs_init()
 {
+#ifdef USE_SHM_OPEN
+	startup_logs_init_shm();
+#else /* ! USE_SHM_OPEN */
 	startup_logs = ring_new(STARTUP_LOG_SIZE);
-}
-
 #endif
+	if (startup_logs)
+		vma_set_name(ring_allocated_area(startup_logs),
+		             ring_allocated_size(startup_logs),
+		             "errors", "startup_logs");
+}
 
 /* free the startup logs, unmap if it was an shm */
 void startup_logs_free(struct ring *r)
 {
 #ifdef USE_SHM_OPEN
 	if (r == shm_startup_logs)
-		munmap(r, STARTUP_LOG_SIZE);
-	else
+		munmap(ring_allocated_area(r), STARTUP_LOG_SIZE);
 #endif /* ! USE_SHM_OPEN */
-		ring_free(r);
+	ring_free(r);
 }
 
 /* duplicate a startup logs which was previously allocated in a shm */
@@ -206,12 +207,11 @@ struct ring *startup_logs_dup(struct ring *src)
 	struct ring *dst = NULL;
 
 	/* must use the size of the previous buffer */
-	dst = ring_new(b_size(&src->buf));
+	dst = ring_new(ring_allocated_size(src));
 	if (!dst)
 		goto error;
 
-	b_reset(&dst->buf);
-	b_ncat(&dst->buf, &src->buf, b_data(&src->buf));
+	ring_dup(dst, src, ring_size(src));
 error:
 	return dst;
 }
@@ -451,6 +451,10 @@ void ha_warning(const char *fmt, ...)
  */
 void _ha_vdiag_warning(const char *fmt, va_list argp)
 {
+	warned |= WARN_ANY;
+	HA_ATOMIC_INC(&tot_warnings);
+
+	warn_exec_path();
 	print_message(1, "DIAG", fmt, argp);
 }
 

@@ -26,6 +26,7 @@
 #include <haproxy/connection-t.h>
 #include <haproxy/pipe-t.h>
 #include <haproxy/show_flags-t.h>
+#include <haproxy/task-t.h>
 #include <haproxy/xref-t.h>
 
 enum iobuf_flags {
@@ -38,6 +39,14 @@ enum iobuf_flags {
 						 *  .done_fastfwd() on consumer side must take care of this flag
 						 */
 	IOBUF_FL_EOI              = 0x00000010, /* A EOI was encountered on producer side */
+	IOBUF_FL_FF_WANT_ROOM     = 0x00000020, /* Producer need more room in the IOBUF to forward data */
+};
+
+/* Flags used */
+enum nego_ff_flags {
+	NEGO_FF_FL_NONE           = 0x00000000, /* For initialization purposes */
+	NEGO_FF_FL_MAY_SPLICE     = 0x00000001, /* Consumer may choose to use kernel splicing if it supports it */
+	NEGO_FF_FL_EXACT_SIZE     = 0x00000002, /* Size passed for the nego is the expected exact size to forwarded */
 };
 
 struct iobuf {
@@ -86,24 +95,33 @@ enum se_flags {
 	SE_FL_ERROR      = 0x00010000,  /* a fatal error was reported */
 	/* Transient flags */
 	SE_FL_ERR_PENDING= 0x00020000,  /* An error is pending, but there's still data to be read */
-	SE_FL_MAY_FASTFWD= 0x00040000,  /* The endpoint may fast-forward data to the other side */
-	SE_FL_RCV_MORE   = 0x00080000,  /* Endpoint may have more bytes to transfer */
-	SE_FL_WANT_ROOM  = 0x00100000,  /* More bytes to transfer, but not enough room */
-	SE_FL_EXP_NO_DATA= 0x00200000,  /* No data expected by the endpoint */
-	SE_FL_ENDP_MASK  = 0x002ff000,  /* Mask for flags set by the endpoint */
+	SE_FL_RCV_MORE   = 0x00040000,  /* Endpoint may have more bytes to transfer */
+	SE_FL_WANT_ROOM  = 0x00080000,  /* More bytes to transfer, but not enough room */
+	SE_FL_EXP_NO_DATA= 0x00100000,  /* No data expected by the endpoint */
+	SE_FL_MAY_FASTFWD_PROD = 0x00200000, /* The endpoint may produce data via zero-copy forwarding */
+	SE_FL_MAY_FASTFWD_CONS = 0x00400000, /* The endpoint may consume data via zero-copy forwarding */
+	SE_FL_ENDP_MASK  = 0x004ff000,  /* Mask for flags set by the endpoint */
 
 	/* following flags are supposed to be set by the app layer and read by
 	 * the endpoint :
 	 */
-	SE_FL_WAIT_FOR_HS   = 0x00400000,  /* This stream is waiting for handhskae */
-	SE_FL_KILL_CONN     = 0x00800000,  /* must kill the connection when the SC closes */
-	SE_FL_WAIT_DATA     = 0x01000000,  /* stream endpoint cannot work without more data from the stream's output */
-	SE_FL_WONT_CONSUME  = 0x02000000,  /* stream endpoint will not consume more data */
-	SE_FL_HAVE_NO_DATA  = 0x04000000,  /* the endpoint has no more data to deliver to the stream */
-	/* unused             0x08000000,*/
-	/* unused             0x10000000,*/
-	/* unused             0x20000000,*/
-	SE_FL_APPLET_NEED_CONN = 0x40000000,  /* applet is waiting for the other side to (fail to) connect */
+	/* unused             0x00800000,*/
+	/* unused             0x01000000,*/
+	/* unused             0x02000000,*/
+	SE_FL_WAIT_FOR_HS   = 0x04000000,  /* This stream is waiting for handhskae */
+	SE_FL_KILL_CONN     = 0x08000000,  /* must kill the connection when the SC closes */
+	SE_FL_WAIT_DATA     = 0x10000000,  /* stream endpoint cannot work without more data from the stream's output */
+	SE_FL_WONT_CONSUME  = 0x20000000,  /* stream endpoint will not consume more data */
+	SE_FL_HAVE_NO_DATA  = 0x40000000,  /* the endpoint has no more data to deliver to the stream */
+	SE_FL_APPLET_NEED_CONN = 0x80000000,  /* applet is waiting for the other side to (fail to) connect */
+};
+
+/* Shutdown modes */
+enum se_shut_mode {
+	SE_SHR_DRAIN  = 0x00000001, /* read shutdown, drain any extra stuff */
+	SE_SHR_RESET  = 0x00000002, /* read shutdown, reset any extra stuff */
+	SE_SHW_NORMAL = 0x00000004, /* regular write shutdown */
+	SE_SHW_SILENT = 0x00000008, /* imminent close, don't notify peer */
 };
 
 /* This function is used to report flags in debugging tools. Please reflect
@@ -119,10 +137,10 @@ static forceinline char *se_show_flags(char *buf, size_t len, const char *delim,
 	_(SE_FL_T_MUX, _(SE_FL_T_APPLET, _(SE_FL_DETACHED, _(SE_FL_ORPHAN,
 	_(SE_FL_SHRD, _(SE_FL_SHRR, _(SE_FL_SHWN, _(SE_FL_SHWS,
 	_(SE_FL_NOT_FIRST, _(SE_FL_WEBSOCKET, _(SE_FL_EOI, _(SE_FL_EOS,
-	_(SE_FL_ERROR, _(SE_FL_ERR_PENDING, _(SE_FL_MAY_FASTFWD,
-	_(SE_FL_RCV_MORE, _(SE_FL_WANT_ROOM, _(SE_FL_EXP_NO_DATA,
+	_(SE_FL_ERROR, _(SE_FL_ERR_PENDING,  _(SE_FL_RCV_MORE,
+	_(SE_FL_WANT_ROOM, _(SE_FL_EXP_NO_DATA, _(SE_FL_MAY_FASTFWD_PROD, _(SE_FL_MAY_FASTFWD_CONS,
 	_(SE_FL_WAIT_FOR_HS, _(SE_FL_KILL_CONN, _(SE_FL_WAIT_DATA,
-	_(SE_FL_WONT_CONSUME, _(SE_FL_HAVE_NO_DATA, _(SE_FL_APPLET_NEED_CONN))))))))))))))))))))))));
+	_(SE_FL_WONT_CONSUME, _(SE_FL_HAVE_NO_DATA, _(SE_FL_APPLET_NEED_CONN)))))))))))))))))))))))));
 	/* epilogue */
 	_(~0U);
 	return buf;
@@ -187,6 +205,7 @@ enum sc_flags {
 	SC_FL_SHUT_DONE     = 0x00020000,  /* A shutdown was performed for the SC */
 
 	SC_FL_EOS           = 0x00040000,  /* End of stream was reached (from down side to up side) */
+	SC_FL_HAVE_BUFF     = 0x00080000,  /* A buffer is ready, flag will be cleared once allocated */
 };
 
 /* This function is used to report flags in debugging tools. Please reflect
@@ -204,7 +223,7 @@ static forceinline char *sc_show_flags(char *buf, size_t len, const char *delim,
 	_(SC_FL_NEED_BUFF, _(SC_FL_NEED_ROOM,
         _(SC_FL_RCV_ONCE, _(SC_FL_SND_ASAP, _(SC_FL_SND_NEVERWAIT, _(SC_FL_SND_EXP_MORE,
 	_(SC_FL_ABRT_WANTED, _(SC_FL_SHUT_WANTED, _(SC_FL_ABRT_DONE, _(SC_FL_SHUT_DONE,
-	_(SC_FL_EOS)))))))))))))))))));
+	_(SC_FL_EOS, _(SC_FL_HAVE_BUFF))))))))))))))))))));
 	/* epilogue */
 	_(~0U);
 	return buf;
@@ -249,6 +268,24 @@ enum sc_state_bit {
 
 struct stconn;
 
+/* represent the abort code, enriched with contextual info:
+ *  - First 5 bits are used for the source (31 possible sources)
+ *  - other bits are reserved for now
+ */
+#define SE_ABRT_SRC_SHIFT 0
+#define SE_ABRT_SRC_MASK  0x0000001f
+
+#define SE_ABRT_SRC_MUX_PT    0x01 /* Code set by the PT mux */
+#define SE_ABRT_SRC_MUX_H1    0x02 /* Code set bu the H1 mux */
+#define SE_ABRT_SRC_MUX_H2    0x03 /* Code set bu the H2 mux */
+#define SE_ABRT_SRC_MUX_QUIC  0x04 /* Code set bu the QUIC/H3 mux */
+#define SE_ABRT_SRC_MUX_FCGI  0x05 /* Code set bu the FCGI mux */
+
+struct se_abort_info {
+	uint32_t info;
+	uint64_t code;
+};
+
 /* A Stream Endpoint Descriptor (sedesc) is the link between the stream
  * connector (ex. stconn) and the Stream Endpoint (mux or appctx).
  * It always exists for either of them, and binds them together. It also
@@ -279,6 +316,7 @@ struct sedesc {
 	struct stconn *sc;         /* the stream connector we're attached to, or NULL */
 	struct iobuf iobuf;        /* contains data forwarded by the other side and that must be sent by the stream endpoint */
 	unsigned int flags;        /* SE_FL_* */
+	struct se_abort_info abort_info; /* Info about abort, as reported by the endpoint and eventually enriched by the app level */
 	unsigned int lra;          /* the last read activity */
 	unsigned int fsb;          /* the first send blocked */
 	/* 4 bytes hole here */

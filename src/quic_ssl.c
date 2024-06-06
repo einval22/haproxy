@@ -2,7 +2,6 @@
 #include <haproxy/ncbuf.h>
 #include <haproxy/proxy.h>
 #include <haproxy/quic_conn.h>
-#include <haproxy/quic_rx.h>
 #include <haproxy/quic_sock.h>
 #include <haproxy/quic_ssl.h>
 #include <haproxy/quic_tls.h>
@@ -442,6 +441,8 @@ int ssl_quic_initial_ctx(struct bind_conf *bind_conf)
 	ctx = SSL_CTX_new(TLS_server_method());
 	bind_conf->initial_ctx = ctx;
 
+	if (global_ssl.security_level > -1)
+		SSL_CTX_set_security_level(ctx, global_ssl.security_level);
 	SSL_CTX_set_options(ctx, options);
 	SSL_CTX_set_mode(ctx, SSL_MODE_RELEASE_BUFFERS);
 	SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
@@ -501,10 +502,10 @@ static forceinline void qc_ssl_dump_errors(struct connection *conn)
  * Remaining parameter are there for debugging purposes.
  * Return 1 if succeeded, 0 if not.
  */
-int qc_ssl_provide_quic_data(struct ncbuf *ncbuf,
-                             enum ssl_encryption_level_t level,
-                             struct ssl_sock_ctx *ctx,
-                             const unsigned char *data, size_t len)
+static int qc_ssl_provide_quic_data(struct ncbuf *ncbuf,
+                                    enum ssl_encryption_level_t level,
+                                    struct ssl_sock_ctx *ctx,
+                                    const unsigned char *data, size_t len)
 {
 #ifdef DEBUG_STRICT
 	enum ncb_ret ncb_ret;
@@ -556,6 +557,17 @@ int qc_ssl_provide_quic_data(struct ncbuf *ncbuf,
 			ERR_clear_error();
 			goto leave;
 		}
+#if defined(LIBRESSL_VERSION_NUMBER)
+		else if (qc->flags & QUIC_FL_CONN_IMMEDIATE_CLOSE) {
+			/* Some libressl versions emit TLS alerts without making the handshake
+			 * (SSL_do_handshake()) fail. This is at least the case for
+			 * libressl-3.9.0 when forcing the TLS cipher to TLS_AES_128_CCM_SHA256.
+			 */
+			TRACE_ERROR("SSL handshake error", QUIC_EV_CONN_IO_CB, qc, &state, &ssl_err);
+			HA_ATOMIC_INC(&qc->prx_counters->hdshk_fail);
+			goto leave;
+		}
+#endif
 
 #if defined(OPENSSL_IS_AWSLC)
 		/* As a server, if early data is accepted, SSL_do_handshake will
@@ -593,8 +605,17 @@ int qc_ssl_provide_quic_data(struct ncbuf *ncbuf,
 		if (qc_is_listener(ctx->qc)) {
 			qc->flags |= QUIC_FL_CONN_NEED_POST_HANDSHAKE_FRMS;
 			qc->state = QUIC_HS_ST_CONFIRMED;
-			/* The connection is ready to be accepted. */
-			quic_accept_push_qc(qc);
+
+			if (!(qc->flags & QUIC_FL_CONN_ACCEPT_REGISTERED)) {
+				quic_accept_push_qc(qc);
+			}
+			else {
+				/* Connection already accepted if 0-RTT used.
+				 * In this case, schedule quic-conn to ensure
+				 * post-handshake frames are emitted.
+				 */
+				tasklet_wakeup(qc->wait_event.tasklet);
+			}
 
 			BUG_ON(qc->li->rx.quic_curr_handshake == 0);
 			HA_ATOMIC_DEC(&qc->li->rx.quic_curr_handshake);
@@ -657,33 +678,37 @@ int qc_ssl_provide_all_quic_data(struct quic_conn *qc, struct ssl_sock_ctx *ctx)
 {
 	int ret = 0;
 	struct quic_enc_level *qel;
-	struct ncbuf ncbuf = NCBUF_NULL;
+	struct ncbuf *ncbuf;
+	ncb_sz_t data;
 
 	TRACE_ENTER(QUIC_EV_CONN_PHPKTS, qc);
 	list_for_each_entry(qel, &qc->qel_list, list) {
-		struct qf_crypto *qf_crypto, *qf_back;
+		struct quic_cstream *cstream = qel->cstream;
 
-		list_for_each_entry_safe(qf_crypto, qf_back, &qel->rx.crypto_frms, list) {
-			const unsigned char *crypto_data = qf_crypto->data;
-			size_t crypto_len = qf_crypto->len;
-
-			/* Free this frame asap */
-			LIST_DELETE(&qf_crypto->list);
-			pool_free(pool_head_qf_crypto, qf_crypto);
-
-			if (!qc_ssl_provide_quic_data(&ncbuf, qel->level, ctx,
-			                              crypto_data, crypto_len))
-				goto leave;
-
-			TRACE_DEVEL("buffered crypto data were provided to TLS stack",
-						QUIC_EV_CONN_PHPKTS, qc, qel);
-		}
-
-		if (!qel->cstream)
+		if (!cstream)
 			continue;
 
-		if (!qc_treat_rx_crypto_frms(qc, qel, ctx))
-			goto leave;
+		ncbuf = &cstream->rx.ncbuf;
+		if (ncb_is_null(ncbuf))
+			continue;
+
+		/* TODO not working if buffer is wrapping */
+		while ((data = ncb_data(ncbuf, 0))) {
+			const unsigned char *cdata = (const unsigned char *)ncb_head(ncbuf);
+
+			if (!qc_ssl_provide_quic_data(&qel->cstream->rx.ncbuf, qel->level,
+			                              ctx, cdata, data))
+				goto leave;
+
+			cstream->rx.offset += data;
+			TRACE_DEVEL("buffered crypto data were provided to TLS stack",
+			            QUIC_EV_CONN_PHPKTS, qc, qel);
+		}
+
+		if (!ncb_is_null(ncbuf) && ncb_is_empty(ncbuf)) {
+			TRACE_DEVEL("freeing crypto buf", QUIC_EV_CONN_PHPKTS, qc, qel);
+			quic_free_ncbuf(ncbuf);
+		}
 	}
 
 	ret = 1;

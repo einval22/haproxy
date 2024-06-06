@@ -27,8 +27,8 @@
 
 
 DECLARE_POOL(pool_head_session, "session", sizeof(struct session));
-DECLARE_POOL(pool_head_sess_srv_list, "session server list",
-		sizeof(struct sess_srv_list));
+DECLARE_POOL(pool_head_sess_priv_conns, "session priv conns list",
+             sizeof(struct sess_priv_conns));
 
 int conn_complete_session(struct connection *conn);
 
@@ -61,7 +61,7 @@ struct session *session_new(struct proxy *fe, struct listener *li, enum obj_type
 		sess->t_idle = -1;
 		_HA_ATOMIC_INC(&totalconn);
 		_HA_ATOMIC_INC(&jobs);
-		LIST_INIT(&sess->srv_list);
+		LIST_INIT(&sess->priv_conns);
 		sess->idle_conns = 0;
 		sess->flags = SESS_FL_NONE;
 		sess->src = NULL;
@@ -76,33 +76,29 @@ struct session *session_new(struct proxy *fe, struct listener *li, enum obj_type
 void session_free(struct session *sess)
 {
 	struct connection *conn, *conn_back;
-	struct sess_srv_list *srv_list, *srv_list_back;
+	struct sess_priv_conns *pconns, *pconns_back;
 
-	if (sess->listener)
+	if (sess->flags & SESS_FL_RELEASE_LI) {
+		/* listener must be set for session used to account FE conns. */
+		BUG_ON(!sess->listener);
 		listener_release(sess->listener);
+	}
+
 	session_store_counters(sess);
 	pool_free(pool_head_stk_ctr, sess->stkctr);
 	vars_prune_per_sess(&sess->vars);
 	conn = objt_conn(sess->origin);
 	if (conn != NULL && conn->mux)
 		conn->mux->destroy(conn->ctx);
-	list_for_each_entry_safe(srv_list, srv_list_back, &sess->srv_list, srv_list) {
-		list_for_each_entry_safe(conn, conn_back, &srv_list->conn_list, session_list) {
-			LIST_DEL_INIT(&conn->session_list);
-			if (conn->mux) {
-				conn->owner = NULL;
-				conn->flags &= ~CO_FL_SESS_IDLE;
-				conn->mux->destroy(conn->ctx);
-			} else {
-				/* We have a connection, but not yet an associated mux.
-				 * So destroy it now.
-				 */
-				conn_stop_tracking(conn);
-				conn_full_close(conn);
-				conn_free(conn);
-			}
+	list_for_each_entry_safe(pconns, pconns_back, &sess->priv_conns, sess_el) {
+		list_for_each_entry_safe(conn, conn_back, &pconns->conn_list, sess_el) {
+			LIST_DEL_INIT(&conn->sess_el);
+			conn->owner = NULL;
+			conn->flags &= ~CO_FL_SESS_IDLE;
+			conn_release(conn);
 		}
-		pool_free(pool_head_sess_srv_list, srv_list);
+		MT_LIST_DELETE(&pconns->srv_el);
+		pool_free(pool_head_sess_priv_conns, pconns);
 	}
 	sockaddr_free(&sess->src);
 	sockaddr_free(&sess->dst);
@@ -190,11 +186,17 @@ int session_accept_fd(struct connection *cli_conn)
 		}
 	}
 
-	sess = session_new(p, l, &cli_conn->obj_type);
-	if (!sess)
-		goto out_free_conn;
+	/* Reversed conns already have an assigned session, do not recreate it. */
+	if (!(cli_conn->flags & CO_FL_REVERSED)) {
+		sess = session_new(p, l, &cli_conn->obj_type);
+		if (!sess)
+			goto out_free_conn;
 
-	conn_set_owner(cli_conn, sess, NULL);
+		conn_set_owner(cli_conn, sess, NULL);
+	}
+	else {
+		sess = cli_conn->owner;
+	}
 
 	/* now evaluate the tcp-request layer4 rules. We only need a session
 	 * and no stream for these rules.
@@ -293,12 +295,19 @@ int session_accept_fd(struct connection *cli_conn)
 		sess->task->process = session_expire_embryonic;
 		sess->task->expire  = tick_add_ifset(now_ms, timeout);
 		task_queue(sess->task);
+
+		/* Session is responsible to decrement listener conns counters. */
+		sess->flags |= SESS_FL_RELEASE_LI;
+
 		return 1;
 	}
 
 	/* OK let's complete stream initialization since there is no handshake */
-	if (conn_complete_session(cli_conn) >= 0)
+	if (conn_complete_session(cli_conn) >= 0) {
+		/* Session is responsible to decrement listener conns counters. */
+		sess->flags |= SESS_FL_RELEASE_LI;
 		return 1;
+	}
 
 	/* if we reach here we have deliberately decided not to keep this
 	 * session (e.g. tcp-request rule), so that's not an error we should
@@ -308,9 +317,9 @@ int session_accept_fd(struct connection *cli_conn)
 
 	/* error unrolling */
  out_free_sess:
-	 /* prevent call to listener_release during session_free. It will be
-	  * done below, for all errors. */
-	sess->listener = NULL;
+	/* SESS_FL_RELEASE_LI must not be set here as listener_release() is
+	 * called manually for all errors.
+	 */
 	session_free(sess);
 
  out_free_conn:
@@ -322,15 +331,8 @@ int session_accept_fd(struct connection *cli_conn)
 		     MSG_DONTWAIT|MSG_NOSIGNAL);
 	}
 
-	if (cli_conn->mux) {
-		/* Mux is already initialized for active reversed connection. */
-		cli_conn->mux->destroy(cli_conn->ctx);
-	}
-	else {
-		conn_stop_tracking(cli_conn);
-		conn_full_close(cli_conn);
-		conn_free(cli_conn);
-	}
+	/* Mux is already initialized for active reversed connection. */
+	conn_release(cli_conn);
 	listener_release(l);
 	return ret;
 }
@@ -443,7 +445,7 @@ static void session_kill_embryonic(struct session *sess, unsigned int state)
 				conn->err_code = CO_ER_SSL_TIMEOUT;
 		}
 
-		if(!LIST_ISEMPTY(&sess->fe->logformat_error)) {
+		if(!lf_expr_isempty(&sess->fe->logformat_error)) {
 			/* Display a log line following the configured error-log-format. */
 			sess_log(sess);
 		}
@@ -518,6 +520,18 @@ int conn_complete_session(struct connection *conn)
 	if (sess->task)
 		session_kill_embryonic(sess, 0);
 	return -1;
+}
+
+/* Add <inc> to the number of cumulated glitches in the tracked counters for
+ * session <sess> which is known for being tracked, and implicitly update the
+ * rate if also tracked.
+ */
+void __session_add_glitch_ctr(struct session *sess, uint inc)
+{
+	int i;
+
+	for (i = 0; i < global.tune.nb_stk_ctr; i++)
+		stkctr_add_glitch_ctr(&sess->stkctr[i], inc);
 }
 
 /*

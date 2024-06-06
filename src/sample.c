@@ -61,6 +61,21 @@ const char *smp_to_type[SMP_TYPES] = {
 	[SMP_T_METH] = "meth",
 };
 
+/* Returns SMP_T_* smp matching with <type> name or SMP_TYPES if
+ * not found.
+ */
+int type_to_smp(const char *type)
+{
+	int it = 0;
+
+	while (it < SMP_TYPES) {
+		if (strcmp(type, smp_to_type[it]) == 0)
+			break; // found
+		it += 1;
+	}
+	return it;
+}
+
 /* static sample used in sample_process() when <p> is NULL */
 static THREAD_LOCAL struct sample temp_smp;
 
@@ -3803,7 +3818,7 @@ static int sample_conv_ungrpc(const struct arg *arg_p, struct sample *smp, void 
 	while (grpc_left > GRPC_MSG_HEADER_SZ) {
 		size_t grpc_msg_len, left;
 
-		grpc_msg_len = left = ntohl(*(uint32_t *)(pos + GRPC_MSG_COMPRESS_FLAG_SZ));
+		grpc_msg_len = left = ntohl(read_u32(pos + GRPC_MSG_COMPRESS_FLAG_SZ));
 
 		pos += GRPC_MSG_HEADER_SZ;
 		grpc_left -= GRPC_MSG_HEADER_SZ;
@@ -4766,29 +4781,57 @@ static int smp_check_uuid(struct arg *args, char **err)
 	if (!args[0].type) {
 		args[0].type = ARGT_SINT;
 		args[0].data.sint = 4;
-	}
-	else if (args[0].data.sint != 4) {
-		memprintf(err, "Unsupported UUID version: '%lld'", args[0].data.sint);
-		return 0;
+	} else {
+		switch (args[0].data.sint) {
+		case 4:
+		case 7:
+			break;
+		default:
+			memprintf(err, "Unsupported UUID version: '%lld'", args[0].data.sint);
+			return 0;
+		}
 	}
 
 	return 1;
 }
 
-// Generate a RFC4122 UUID (default is v4 = fully random)
+// Generate a RFC 9562 UUID (default is v4 = fully random)
 static int smp_fetch_uuid(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
-	if (args[0].data.sint == 4 || !args[0].type) {
-		ha_generate_uuid(&trash);
-		smp->data.type = SMP_T_STR;
-		smp->flags = SMP_F_VOL_TEST | SMP_F_MAY_CHANGE;
-		smp->data.u.str = trash;
-		return 1;
+	long long int type = -1;
+
+	if (!args[0].type) {
+		type = 4;
+	} else {
+		type = args[0].data.sint;
 	}
 
-	// more implementations of other uuid formats possible here
-	return 0;
+	switch (type) {
+	case 4:
+		ha_generate_uuid_v4(&trash);
+		break;
+	case 7:
+		ha_generate_uuid_v7(&trash);
+		break;
+	default:
+		return 0;
+	}
+
+	smp->data.type = SMP_T_STR;
+	smp->flags = SMP_F_VOL_TEST | SMP_F_MAY_CHANGE;
+	smp->data.u.str = trash;
+	return 1;
 }
+
+/* returns the uptime in seconds */
+static int
+smp_fetch_uptime(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = ns_to_sec(now_ns - start_time_ns);
+	return 1;
+}
+
 
 /* Check if QUIC support was compiled and was not disabled by "no-quic" global option */
 static int smp_fetch_quic_enabled(const struct arg *args, struct sample *smp, const char *kw, void *private)
@@ -4915,6 +4958,30 @@ error:
 	return 0;
 }
 
+/* Server conn queueing infos - bc_{be,srv}_queue */
+static int smp_fetch_conn_queues(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	struct strm_logs *logs;
+
+	if (!smp->strm)
+		return 0;
+
+	smp->data.type = SMP_T_SINT;
+	smp->flags = 0;
+
+	logs = &smp->strm->logs;
+
+	if (kw[3] == 'b') {
+		/* bc_be_queue */
+		smp->data.u.sint = logs->prx_queue_pos;
+	}
+	else {
+		/* bc_srv_queue */
+		smp->data.u.sint = logs->srv_queue_pos;
+	}
+	return 1;
+}
+
 /* Timing events {f,bc}.timer.  */
 static int smp_fetch_conn_timers(const struct arg *args, struct sample *smp, const char *kw, void *private)
 {
@@ -5029,6 +5096,9 @@ static struct sample_fetch_kw_list smp_logs_kws = {ILH, {
 	{ "txn.timer.user",       smp_fetch_txn_timers,   0,         NULL, SMP_T_SINT, SMP_USE_TXFIN }, /* "Tu" */
 
 	{ "bc.timer.connect",     smp_fetch_conn_timers,  0,         NULL, SMP_T_SINT, SMP_USE_L4SRV }, /* "Tc" */
+	{ "bc_be_queue",          smp_fetch_conn_queues,  0,         NULL, SMP_T_SINT, SMP_USE_L4SRV }, /* "bq" */
+	{ "bc_srv_queue",         smp_fetch_conn_queues,  0,         NULL, SMP_T_SINT, SMP_USE_L4SRV }, /* "sq" */
+
 	{ "fc.timer.handshake",   smp_fetch_conn_timers,  0,         NULL, SMP_T_SINT, SMP_USE_L4CLI }, /* "Th" */
 	{ "fc.timer.total",       smp_fetch_conn_timers,  0,         NULL, SMP_T_SINT, SMP_USE_SSFIN }, /* "Tt" */
 
@@ -5063,6 +5133,7 @@ static struct sample_fetch_kw_list smp_kws = {ILH, {
 	{ "thread",       smp_fetch_thread,  0,          NULL, SMP_T_SINT, SMP_USE_CONST },
 	{ "rand",         smp_fetch_rand,  ARG1(0,SINT), NULL, SMP_T_SINT, SMP_USE_CONST },
 	{ "stopping",     smp_fetch_stopping, 0,         NULL, SMP_T_BOOL, SMP_USE_INTRN },
+	{ "uptime",       smp_fetch_uptime,   0,         NULL, SMP_T_SINT, SMP_USE_CONST },
 	{ "uuid",         smp_fetch_uuid,  ARG1(0, SINT),      smp_check_uuid, SMP_T_STR, SMP_USE_CONST },
 
 	{ "cpu_calls",    smp_fetch_cpu_calls,  0,       NULL, SMP_T_SINT, SMP_USE_INTRN },

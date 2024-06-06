@@ -46,6 +46,7 @@
 #include <haproxy/thread.h>
 #include <haproxy/time.h>
 #include <haproxy/tools.h>
+#include <haproxy/trace.h>
 #include <import/ist.h>
 
 
@@ -112,7 +113,7 @@ struct post_mortem {
 		uid_t boot_uid;
 		gid_t boot_gid;
 		struct rlimit limit_fd;  // RLIMIT_NOFILE
-		struct rlimit limit_ram; // RLIMIT_AS or RLIMIT_DATA
+		struct rlimit limit_ram; // RLIMIT_DATA
 
 #if defined(USE_THREAD)
 		struct {
@@ -300,9 +301,15 @@ void ha_thread_dump_one(int thr, int from_signal)
 		if (th_ctx->current &&
 		    th_ctx->current->process == process_stream && th_ctx->current->context) {
 			const struct stream *s = (const struct stream *)th_ctx->current->context;
-			struct hlua *hlua = s ? s->hlua : NULL;
+			struct hlua *hlua = NULL;
 
-			if (hlua && hlua->T) {
+			if (s) {
+				if (s->hlua[0] && HLUA_IS_BUSY(s->hlua[0]))
+					hlua = s->hlua[0];
+				else if (s->hlua[1] && HLUA_IS_BUSY(s->hlua[1]))
+					hlua = s->hlua[1];
+			}
+			if (hlua) {
 				mark_tainted(TAINTED_LUA_STUCK);
 				if (hlua->state_id == 0)
 					mark_tainted(TAINTED_LUA_STUCK_SHARED);
@@ -417,7 +424,9 @@ void ha_task_dump(struct buffer *buf, const struct task *task, const char *pfx)
 
 #ifdef USE_LUA
 	hlua = NULL;
-	if (s && (hlua = s->hlua)) {
+	if (s && ((s->hlua[0] && HLUA_IS_BUSY(s->hlua[0])) ||
+	    (s->hlua[1] && HLUA_IS_BUSY(s->hlua[1])))) {
+		hlua = (s->hlua[0] && HLUA_IS_BUSY(s->hlua[0])) ? s->hlua[0] : s->hlua[1];
 		chunk_appendf(buf, "%sCurrent executing Lua from a stream analyser -- ", pfx);
 	}
 	else if (task->process == hlua_process_task && (hlua = task->context)) {
@@ -448,12 +457,7 @@ void ha_task_dump(struct buffer *buf, const struct task *task, const char *pfx)
  */
 static int cli_io_handler_show_threads(struct appctx *appctx)
 {
-	struct stconn *sc = appctx_sc(appctx);
 	int thr;
-
-	/* FIXME: Don't watch the other side !*/
-	if (unlikely(sc_opposite(sc)->flags & SC_FL_SHUT_DONE))
-		return 1;
 
 	if (appctx->st0)
 		thr = appctx->st1;
@@ -658,7 +662,7 @@ int debug_parse_cli_bug(char **args, char *payload, struct appctx *appctx, void 
 		return 1;
 
 	_HA_ATOMIC_INC(&debug_commands_issued);
-	BUG_ON(one > zero);
+	BUG_ON(one > zero, "This was triggered on purpose from the CLI 'debug dev bug' command.");
 	return 1;
 }
 
@@ -671,7 +675,7 @@ int debug_parse_cli_warn(char **args, char *payload, struct appctx *appctx, void
 		return 1;
 
 	_HA_ATOMIC_INC(&debug_commands_issued);
-	WARN_ON(one > zero);
+	WARN_ON(one > zero, "This was triggered on purpose from the CLI 'debug dev warn' command.");
 	return 1;
 }
 
@@ -684,7 +688,7 @@ int debug_parse_cli_check(char **args, char *payload, struct appctx *appctx, voi
 		return 1;
 
 	_HA_ATOMIC_INC(&debug_commands_issued);
-	CHECK_IF(one > zero);
+	CHECK_IF(one > zero, "This was triggered on purpose from the CLI 'debug dev check' command.");
 	return 1;
 }
 
@@ -1293,7 +1297,7 @@ static int debug_parse_delay_inj(char **args, char *payload, struct appctx *appc
 
 	_HA_ATOMIC_INC(&debug_commands_issued);
 
-	tctx = calloc(sizeof(*tctx), 2);
+	tctx = calloc(2, sizeof(*tctx));
 	if (!tctx)
 		goto fail;
 
@@ -1427,7 +1431,7 @@ static int debug_parse_cli_sched(char **args, char *payload, struct appctx *appc
 			*(uint8_t *)ptr = new;
 	}
 
-	tctx = calloc(sizeof(*tctx), count + 2);
+	tctx = calloc(count + 2, sizeof(*tctx));
 	if (!tctx)
 		goto fail;
 
@@ -1496,6 +1500,112 @@ static int debug_parse_cli_sched(char **args, char *payload, struct appctx *appc
 	return cli_err(appctx, "Not enough memory");
 }
 
+#if defined(DEBUG_DEV)
+/* All of this is for "trace dbg" */
+
+static struct trace_source trace_dbg __read_mostly = {
+	.name = IST("dbg"),
+	.desc = "trace debugger",
+	.report_events = ~0,  // report everything by default
+};
+
+#define TRACE_SOURCE &trace_dbg
+INITCALL1(STG_REGISTER, trace_register_source, TRACE_SOURCE);
+
+/* This is the task handler used to send traces in loops. Note that the task's
+ * context contains the number of remaining calls to be done. The task sends 20
+ * messages per wakeup.
+ */
+static struct task *debug_trace_task(struct task *t, void *ctx, unsigned int state)
+{
+	ulong count;
+
+	/* send 2 traces enter/leave +18 devel = 20 traces total */
+	TRACE_ENTER(1);
+	TRACE_DEVEL("msg01 has 20 bytes .", 1);
+	TRACE_DEVEL("msg02 has 20 bytes .", 1);
+	TRACE_DEVEL("msg03 has 20 bytes .", 1);
+	TRACE_DEVEL("msg04 has 70 bytes payload: 0123456789 0123456789 0123456789 012345678", 1);
+	TRACE_DEVEL("msg05 has 70 bytes payload: 0123456789 0123456789 0123456789 012345678", 1);
+	TRACE_DEVEL("msg06 has 70 bytes payload: 0123456789 0123456789 0123456789 012345678", 1);
+	TRACE_DEVEL("msg07 has 120 bytes payload: 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 012", 1);
+	TRACE_DEVEL("msg08 has 120 bytes payload: 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 012", 1);
+	TRACE_DEVEL("msg09 has 120 bytes payload: 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 012", 1);
+	TRACE_DEVEL("msg10 has 170 bytes payload: 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 012345678", 1);
+	TRACE_DEVEL("msg11 has 170 bytes payload: 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 012345678", 1);
+	TRACE_DEVEL("msg12 has 170 bytes payload: 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 012345678", 1);
+	TRACE_DEVEL("msg13 has 220 bytes payload: 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123", 1);
+	TRACE_DEVEL("msg14 has 220 bytes payload: 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123", 1);
+	TRACE_DEVEL("msg15 has 220 bytes payload: 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123", 1);
+	TRACE_DEVEL("msg16 has 270 bytes payload: 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789", 1);
+	TRACE_DEVEL("msg17 has 270 bytes payload: 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789", 1);
+	TRACE_DEVEL("msg18 has 270 bytes payload: 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789 0123456789", 1);
+	TRACE_LEAVE(1);
+
+	count = (ulong)t->context;
+	t->context = (void*)count - 1;
+
+	if (count)
+		task_wakeup(t, TASK_WOKEN_MSG);
+	else {
+		task_destroy(t);
+		t = NULL;
+	}
+	return t;
+}
+
+/* parse a "debug dev trace" command
+ * debug dev trace <nbthr>.
+ * It will create as many tasks (one per thread), starting from lowest threads.
+ * The traces will stop after 1M wakeups or 20M messages ~= 4GB of data.
+ */
+static int debug_parse_cli_trace(char **args, char *payload, struct appctx *appctx, void *private)
+{
+	unsigned long count = 1;
+	unsigned long i;
+	char *msg = NULL;
+	char *endarg;
+
+	if (!cli_has_level(appctx, ACCESS_LVL_ADMIN))
+		return 1;
+
+	_HA_ATOMIC_INC(&debug_commands_issued);
+
+	if (!args[3][0]) {
+		memprintf(&msg, "Need a thread count. Note that 20M msg will be sent per thread.\n");
+		goto fail;
+	}
+
+	/* parse the new value . */
+	count = strtoll(args[3], &endarg, 0);
+	if (args[3][1] && *endarg) {
+		memprintf(&msg, "Ignoring unparsable thread number '%s'.\n", args[3]);
+		goto fail;
+	}
+
+	if (count >= global.nbthread)
+		count = global.nbthread;
+
+	for (i = 0; i < count; i++) {
+		struct task *task = task_new_on(i);
+
+		if (!task)
+			goto fail;
+
+		task->process = debug_trace_task;
+		task->context = (void*)(ulong)1000000; // 1M wakeups = 20M messages
+		task_wakeup(task, TASK_WOKEN_INIT);
+	}
+
+	if (msg && *msg)
+		return cli_dynmsg(appctx, LOG_INFO, msg);
+	return 1;
+
+ fail:
+	return cli_dynmsg(appctx, LOG_ERR, msg);
+}
+#endif /* DEBUG_DEV */
+
 /* CLI state for "debug dev fd" */
 struct dev_fd_ctx {
 	int start_fd;
@@ -1523,7 +1633,6 @@ static int debug_parse_cli_fd(char **args, char *payload, struct appctx *appctx,
 static int debug_iohandler_fd(struct appctx *appctx)
 {
 	struct dev_fd_ctx *ctx = appctx->svcctx;
-	struct stconn *sc = appctx_sc(appctx);
 	struct sockaddr_storage sa;
 	struct stat statbuf;
 	socklen_t salen, vlen;
@@ -1531,10 +1640,6 @@ static int debug_iohandler_fd(struct appctx *appctx)
 	char *addrstr;
 	int ret = 1;
 	int i, fd;
-
-	/* FIXME: Don't watch the other side !*/
-	if (unlikely(sc_opposite(sc)->flags & SC_FL_SHUT_DONE))
-		goto end;
 
 	chunk_reset(&trash);
 
@@ -1685,7 +1790,6 @@ static int debug_iohandler_fd(struct appctx *appctx)
 	}
 
 	thread_release();
- end:
 	return ret;
 }
 
@@ -1755,14 +1859,9 @@ static int debug_parse_cli_memstats(char **args, char *payload, struct appctx *a
 static int debug_iohandler_memstats(struct appctx *appctx)
 {
 	struct dev_mem_ctx *ctx = appctx->svcctx;
-	struct stconn *sc = appctx_sc(appctx);
 	struct mem_stats *ptr;
 	const char *pfx = ctx->match;
 	int ret = 1;
-
-	/* FIXME: Don't watch the other side !*/
-	if (unlikely(sc_opposite(sc)->flags & SC_FL_SHUT_DONE))
-		goto end;
 
 	if (!ctx->width) {
 		/* we don't know the first column's width, let's compute it
@@ -2174,11 +2273,7 @@ static int feed_post_mortem()
 	post_mortem.process.boot_gid = getegid();
 
 	getrlimit(RLIMIT_NOFILE, &post_mortem.process.limit_fd);
-#if defined(RLIMIT_AS)
-	getrlimit(RLIMIT_AS, &post_mortem.process.limit_ram);
-#elif defined(RLIMIT_DATA)
 	getrlimit(RLIMIT_DATA, &post_mortem.process.limit_ram);
-#endif
 
 	if (strcmp(post_mortem.platform.utsname.sysname, "Linux") == 0)
 		feed_post_mortem_linux();
@@ -2287,6 +2382,9 @@ static struct cli_kw_list cli_kws = {{ },{
 	{{ "debug", "dev", "sym",   NULL },    "debug dev sym    <addr>                 : resolve symbol address",                  debug_parse_cli_sym,   NULL, NULL, NULL, ACCESS_EXPERT },
 	{{ "debug", "dev", "task",  NULL },    "debug dev task <ptr> [wake|expire|kill] : show/wake/expire/kill task/tasklet",      debug_parse_cli_task,  NULL, NULL, NULL, ACCESS_EXPERT },
 	{{ "debug", "dev", "tkill", NULL },    "debug dev tkill  [thr] [sig]            : send signal to thread",                   debug_parse_cli_tkill, NULL, NULL, NULL, ACCESS_EXPERT },
+#if defined(DEBUG_DEV)
+	{{ "debug", "dev", "trace", NULL },    "debug dev trace [nbthr]                 : flood traces from that many threads",     debug_parse_cli_trace,  NULL, NULL, NULL, ACCESS_EXPERT },
+#endif
 	{{ "debug", "dev", "warn",  NULL },    "debug dev warn                          : call WARN_ON() and possibly crash",       debug_parse_cli_warn,  NULL, NULL, NULL, ACCESS_EXPERT },
 	{{ "debug", "dev", "write", NULL },    "debug dev write  [size]                 : write that many bytes in return",         debug_parse_cli_write, NULL, NULL, NULL, ACCESS_EXPERT },
 

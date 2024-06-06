@@ -91,6 +91,27 @@ static inline size_t b_full(const struct buffer *b)
 	return !b_room(b);
 }
 
+/* b_add_ofs() : return new offset within buffer after applying wrapping. Only
+ * offsets resulting from initial positions added to counts within buffer size
+ * limits are handled.
+ */
+static inline size_t b_add_ofs(const struct buffer *b, size_t ofs, size_t count)
+{
+	ofs += count;
+	if (ofs >= b->size)
+		ofs -= b->size;
+	return ofs;
+}
+
+/* b_rel_ofs() : take an absolute offset in the buffer, and return it relative
+ * to the buffer's head for use with b_peek().
+ */
+static inline size_t b_rel_ofs(const struct buffer *b, size_t ofs)
+{
+	if (ofs < b->head)
+		ofs += b->size;
+	return ofs - b->head;
+}
 
 /* b_stop() : returns the pointer to the byte following the end of the buffer,
  * which may be out of the buffer if the buffer ends on the last byte of the
@@ -314,6 +335,38 @@ static inline size_t b_contig_space(const struct buffer *b)
 	return left;
 }
 
+/* b_getblk_ofs() : gets one full block of data at once from a buffer, starting
+ * from offset <offset> after the buffer's area, and for exactly <len> bytes.
+ * As a convenience to avoid complex checks in callers, the offset is allowed
+ * to exceed a valid one by no more than one buffer size, and will automatically
+ * be wrapped. The caller is responsible for ensuring that <len> doesn't exceed
+ * the known length of the available data at this position, otherwise undefined
+ * data will be returned. This is meant to be used on concurrently accessed
+ * buffers, so that a reader can read a known area while the buffer is being fed
+ * and trimmed. The function guarantees never to use ->head nor ->data. The
+ * buffer is left unaffected. It always returns the number of bytes copied.
+ */
+static inline size_t b_getblk_ofs(const struct buffer *buf, char *blk, size_t len, size_t offset)
+{
+	size_t firstblock;
+
+	if (offset >= buf->size)
+		offset -= buf->size;
+
+	BUG_ON(offset >= buf->size);
+
+	firstblock = buf->size - offset;
+
+	if (firstblock >= len)
+		firstblock = len;
+
+	memcpy(blk, b_orig(buf) + offset, firstblock);
+
+	if (len > firstblock)
+		memcpy(blk + firstblock, b_orig(buf), len - firstblock);
+	return len;
+}
+
 /* b_getblk() : gets one full block of data at once from a buffer, starting
  * from offset <offset> after the buffer's head, and limited to no more than
  * <len> bytes. The caller is responsible for ensuring that neither <offset>
@@ -380,6 +433,121 @@ static inline size_t b_getblk_nc(const struct buffer *buf, const char **blk1, si
 	}
 	*len1 = max;
 	return 1;
+}
+
+/* Locates the longest part of the buffer that is composed exclusively of
+ * characters not in the <delim> set, and delimited by one of these characters,
+ * and returns the initial part and the first of such delimiters. A single
+ * escape character in <escape> may be specified so that when not 0 and found,
+ * the character that follows it is never taken as a delimiter. Note that
+ * <delim> cannot contain the zero byte, hence this function is not usable with
+ * byte zero as a delimiter.
+ *
+ * Return values :
+ *   >0 : number of bytes read. Includes the sep if present before len or end.
+ *   =0 : no sep before end found. <str> is left undefined.
+ *
+ * The buffer is left unaffected. Unused buffers are left in an undefined state.
+ */
+static inline size_t b_getdelim(const struct buffer *buf, size_t offset, size_t count,
+				char *str, size_t len, const char *delim, char escape)
+{
+	uchar delim_map[256 / 8];
+	int found, escaped;
+	uint pos, bit;
+	size_t ret, max;
+	uchar b;
+	char *p;
+
+	ret = 0;
+	p = b_peek(buf, offset);
+
+	max = len;
+	if (!count || offset+count > b_data(buf))
+		goto out;
+	if (max > count) {
+		max = count;
+		str[max-1] = 0;
+	}
+
+	/* create the byte map */
+	memset(delim_map, 0, sizeof(delim_map));
+	while ((b = *delim)) {
+		pos = b >> 3;
+		bit = b &  7;
+		delim_map[pos] |= 1 << bit;
+		delim++;
+	}
+
+	found = escaped = 0;
+	while (max) {
+		*str++ = b = *p;
+		ret++;
+		max--;
+
+		if (escape && (escaped || *p == escape)) {
+			escaped = !escaped;
+			goto skip;
+		}
+
+		pos = b >> 3;
+		bit = b &  7;
+		if (delim_map[pos] & (1 << bit)) {
+			found = 1;
+			break;
+		}
+	  skip:
+		p = b_next(buf, p);
+	}
+
+	if (ret > 0 && !found)
+		ret = 0;
+ out:
+	if (max)
+		*str = 0;
+	return ret;
+}
+
+/* Gets one text line out of aa buffer.
+ * Return values :
+ *   >0 : number of bytes read. Includes the \n if present before len or end.
+ *   =0 : no '\n' before end found. <str> is left undefined.
+ *
+ * The buffer is left unaffected. Unused buffers are left in an undefined state.
+ */
+static inline size_t b_getline(const struct buffer *buf, size_t offset, size_t count,
+			       char *str, size_t len)
+{
+	size_t ret, max;
+	char *p;
+
+	ret = 0;
+	p = b_peek(buf, offset);
+
+	max = len;
+	if (!count || offset+count > b_data(buf))
+		goto out;
+	if (max > count) {
+		max = count;
+		str[max-1] = 0;
+	}
+
+	while (max) {
+		*str++ = *p;
+		ret++;
+		max--;
+
+		if (*p == '\n')
+			break;
+		p = b_next(buf, p);
+	}
+
+	if (ret > 0 && *(str-1) != '\n')
+		ret = 0;
+ out:
+	if (max)
+		*str = 0;
+	return ret;
 }
 
 
@@ -536,6 +704,40 @@ static inline void b_putchr(struct buffer *b, char c)
 	b->data++;
 }
 
+/* b_putblk_ofs(): puts one full block of data of length <len> from <blk> into
+ * the buffer, starting from absolute offset <offset> after the buffer's area.
+ * As a convenience to avoid complex checks in callers, the offset is allowed
+ * to exceed a valid one by no more than one buffer size, and will automatically
+ * be wrapped. The caller is responsible for ensuring that <len> doesn't exceed
+ * the known length of the available room at this position, otherwise data may
+ * be overwritten. The buffer's length is *not* updated, so generally the caller
+ * will have updated it before calling this function. This is meant to be used
+ * on concurrently accessed buffers, so that a writer can append data while a
+ * reader is blocked by other means from reaching the current area The function
+ * guarantees never to use ->head nor ->data. It always returns the number of
+ * bytes copied.
+ */
+static inline size_t b_putblk_ofs(struct buffer *buf, char *blk, size_t len, size_t offset)
+{
+	size_t firstblock;
+
+	if (offset >= buf->size)
+		offset -= buf->size;
+
+	BUG_ON(offset >= buf->size);
+
+	firstblock = buf->size - offset;
+
+	if (firstblock >= len)
+		firstblock = len;
+
+	memcpy(b_orig(buf) + offset, blk, firstblock);
+
+	if (len > firstblock)
+		memcpy(b_orig(buf), blk + firstblock, len - firstblock);
+	return len;
+}
+
 /* __b_putblk() : tries to append <len> bytes from block <blk> to the end of
  * buffer <b> without checking for free space (it's up to the caller to do it).
  * Supports wrapping. It must not be called with len == 0.
@@ -619,7 +821,7 @@ static inline size_t b_xfer(struct buffer *dst, struct buffer *src, size_t count
  * b_room(dst).
  * Returns the number of bytes copied.
  */
-static inline size_t b_ncat(struct buffer *dst, struct buffer *src, size_t count)
+static inline size_t b_ncat(struct buffer *dst, const struct buffer *src, size_t count)
 {
 	size_t ret, block1, block2;
 

@@ -506,6 +506,7 @@ static void qc_notify_cc_of_newly_acked_pkts(struct quic_conn *qc,
 			qc_treat_ack_of_ack(qc, &pkt->pktns->rx.arngs, pkt->largest_acked_pn);
 		ev.ack.acked = pkt->in_flight_len;
 		ev.ack.time_sent = pkt->time_sent;
+		ev.ack.pn = pkt->pn_node.key;
 		quic_cc_event(&qc->path->cc, &ev);
 		LIST_DEL_INIT(&pkt->list);
 		quic_tx_packet_refdec(pkt);
@@ -719,29 +720,7 @@ static int qc_handle_crypto_frm(struct quic_conn *qc,
 		crypto_frm->offset = cstream->rx.offset;
 	}
 
-	if (crypto_frm->offset == cstream->rx.offset && ncb_is_empty(ncbuf)) {
-		struct qf_crypto *qf_crypto;
-
-		qf_crypto = pool_alloc(pool_head_qf_crypto);
-		if (!qf_crypto) {
-			TRACE_ERROR("CRYPTO frame allocation failed", QUIC_EV_CONN_PRSHPKT, qc);
-			goto leave;
-		}
-
-		qf_crypto->offset = crypto_frm->offset;
-		qf_crypto->len = crypto_frm->len;
-		qf_crypto->data = crypto_frm->data;
-		qf_crypto->qel = qel;
-		LIST_APPEND(&qel->rx.crypto_frms, &qf_crypto->list);
-
-		cstream->rx.offset += crypto_frm->len;
-		HA_ATOMIC_OR(&qc->wait_event.tasklet->state, TASK_HEAVY);
-		TRACE_DEVEL("increment crypto level offset", QUIC_EV_CONN_PHPKTS, qc, qel);
-		goto done;
-	}
-
-	if (!quic_get_ncbuf(ncbuf) ||
-	    ncb_is_null(ncbuf)) {
+	if (!quic_get_ncbuf(ncbuf) || ncb_is_null(ncbuf)) {
 		TRACE_ERROR("CRYPTO ncbuf allocation failed", QUIC_EV_CONN_PRSHPKT, qc);
 		goto leave;
 	}
@@ -762,8 +741,11 @@ static int qc_handle_crypto_frm(struct quic_conn *qc,
 		goto leave;
 	}
 
-	if (ncb_data(ncbuf, 0))
+	/* Reschedule with TASK_HEAVY if CRYPTO data ready for decoding. */
+	if (ncb_data(ncbuf, 0)) {
 		HA_ATOMIC_OR(&qc->wait_event.tasklet->state, TASK_HEAVY);
+		tasklet_wakeup(qc->wait_event.tasklet);
+	}
 
  done:
 	ret = 1;
@@ -882,6 +864,7 @@ static int qc_parse_pkt_frms(struct quic_conn *qc, struct quic_rx_packet *pkt,
 		case QUIC_FT_PING:
 			break;
 		case QUIC_FT_ACK:
+		case QUIC_FT_ACK_ECN:
 		{
 			unsigned int rtt_sample;
 			rtt_sample = UINT_MAX;
@@ -923,6 +906,9 @@ static int qc_parse_pkt_frms(struct quic_conn *qc, struct quic_rx_packet *pkt,
 		case QUIC_FT_CRYPTO:
 			if (!qc_handle_crypto_frm(qc, &frm.crypto, pkt, qel, &fast_retrans))
 				goto leave;
+			break;
+		case QUIC_FT_NEW_TOKEN:
+			/* TODO */
 			break;
 		case QUIC_FT_STREAM_8 ... QUIC_FT_STREAM_F:
 		{
@@ -996,7 +982,7 @@ static int qc_parse_pkt_frms(struct quic_conn *qc, struct quic_rx_packet *pkt,
 			break;
 		case QUIC_FT_RETIRE_CONNECTION_ID:
 		{
-			struct quic_cid_tree *tree;
+			struct quic_cid_tree *tree __maybe_unused;
 			struct quic_connection_id *conn_id = NULL;
 
 			if (!qc_handle_retire_connection_id_frm(qc, &frm, &pkt->dcid, &conn_id))
@@ -1023,6 +1009,10 @@ static int qc_parse_pkt_frms(struct quic_conn *qc, struct quic_rx_packet *pkt,
 			}
 			break;
 		}
+		case QUIC_FT_PATH_CHALLENGE:
+		case QUIC_FT_PATH_RESPONSE:
+			/* TODO */
+			break;
 		case QUIC_FT_CONNECTION_CLOSE:
 		case QUIC_FT_CONNECTION_CLOSE_APP:
 			/* Increment the error counters */
@@ -1048,14 +1038,22 @@ static int qc_parse_pkt_frms(struct quic_conn *qc, struct quic_rx_packet *pkt,
 			if (qc_is_listener(qc)) {
 				TRACE_ERROR("non accepted QUIC_FT_HANDSHAKE_DONE frame",
 				            QUIC_EV_CONN_PRSHPKT, qc);
+
+				/* RFC 9000 19.20. HANDSHAKE_DONE Frames
+				 *
+				 * A
+				 * server MUST treat receipt of a HANDSHAKE_DONE frame as a connection
+				 * error of type PROTOCOL_VIOLATION.
+				 */
+				quic_set_connection_close(qc, quic_err_transport(QC_ERR_PROTOCOL_VIOLATION));
 				goto leave;
 			}
 
 			qc->state = QUIC_HS_ST_CONFIRMED;
 			break;
 		default:
-			TRACE_ERROR("unknosw frame type", QUIC_EV_CONN_PRSHPKT, qc);
-			goto leave;
+			/* Unknown frame type must be rejected by qc_parse_frm(). */
+			ABORT_NOW();
 		}
 	}
 
@@ -1156,50 +1154,6 @@ static void qc_rm_hp_pkts(struct quic_conn *qc, struct quic_enc_level *el)
 
   out:
 	TRACE_LEAVE(QUIC_EV_CONN_ELRMHP, qc);
-}
-
-/* Process all the CRYPTO frame at <el> encryption level. This is the
- * responsibility of the called to ensure there exists a CRYPTO data
- * stream for this level.
- * Return 1 if succeeded, 0 if not.
- */
-int qc_treat_rx_crypto_frms(struct quic_conn *qc, struct quic_enc_level *el,
-                            struct ssl_sock_ctx *ctx)
-{
-	int ret = 0;
-	struct ncbuf *ncbuf;
-	struct quic_cstream *cstream = el->cstream;
-	ncb_sz_t data;
-
-	TRACE_ENTER(QUIC_EV_CONN_PHPKTS, qc);
-
-	BUG_ON(!cstream);
-	ncbuf = &cstream->rx.ncbuf;
-	if (ncb_is_null(ncbuf))
-		goto done;
-
-	/* TODO not working if buffer is wrapping */
-	while ((data = ncb_data(ncbuf, 0))) {
-		const unsigned char *cdata = (const unsigned char *)ncb_head(ncbuf);
-
-		if (!qc_ssl_provide_quic_data(&el->cstream->rx.ncbuf, el->level,
-		                              ctx, cdata, data))
-			goto leave;
-
-		cstream->rx.offset += data;
-		TRACE_DEVEL("buffered crypto data were provided to TLS stack",
-		            QUIC_EV_CONN_PHPKTS, qc, el);
-	}
-
- done:
-	ret = 1;
- leave:
-	if (!ncb_is_null(ncbuf) && ncb_is_empty(ncbuf)) {
-		TRACE_DEVEL("freeing crypto buf", QUIC_EV_CONN_PHPKTS, qc, el);
-		quic_free_ncbuf(ncbuf);
-	}
-	TRACE_LEAVE(QUIC_EV_CONN_PHPKTS, qc);
-	return ret;
 }
 
 /* Check if it's possible to remove header protection for packets related to
@@ -1329,15 +1283,6 @@ int qc_treat_rx_pkts(struct quic_conn *qc)
 			/* Update the largest acknowledged packet timestamps */
 			qel->pktns->rx.largest_time_received = largest_pn_time_received;
 			qel->pktns->flags |= QUIC_FL_PKTNS_NEW_LARGEST_PN;
-		}
-
-		if (qel->cstream) {
-			struct ncbuf *ncbuf = &qel->cstream->rx.ncbuf;
-
-			if (!ncb_is_null(ncbuf) && ncb_data(ncbuf, 0)) {
-				/* Some in order CRYPTO data were bufferized. */
-				HA_ATOMIC_OR(&qc->wait_event.tasklet->state, TASK_HEAVY);
-			}
 		}
 
 		/* Release the Initial encryption level and packet number space. */
@@ -1517,7 +1462,7 @@ static inline int quic_read_uint32(uint32_t *val,
 	if (end - *buf < sizeof *val)
 		return 0;
 
-	*val = ntohl(*(uint32_t *)*buf);
+	*val = ntohl(read_u32(*buf));
 	*buf += sizeof *val;
 
 	return 1;
@@ -1742,6 +1687,9 @@ static struct quic_conn *quic_rx_pkt_retrieve_conn(struct quic_rx_packet *pkt,
 		}
 	}
 	else if (!qc) {
+		/* Stateless Reset sent even for Long header packets as haproxy
+		 * emits stateless_reset_token in its TPs.
+		 */
 		TRACE_PROTO("RX non Initial pkt without connection", QUIC_EV_CONN_LPKT, NULL, NULL, NULL, pkt->version);
 		if (!send_stateless_reset(l, &dgram->saddr, pkt))
 			TRACE_ERROR("stateless reset not sent", QUIC_EV_CONN_LPKT, qc);

@@ -45,6 +45,7 @@
 #define APPCTX_CLI_ST1_PAYLOAD (1 << 1)
 #define APPCTX_CLI_ST1_NOLF    (1 << 2)
 #define APPCTX_CLI_ST1_TIMED   (1 << 3)
+#define APPCTX_CLI_ST1_LASTCMD (1 << 4)
 
 #define CLI_PREFIX_KW_NB 5
 #define CLI_MAX_MATCHES 5
@@ -55,6 +56,7 @@ enum {
 	CLI_ST_INIT = 0,   /* initial state, must leave to zero ! */
 	CLI_ST_END,        /* final state, let's close */
 	CLI_ST_GETREQ,     /* wait for a request */
+	CLI_ST_PARSEREQ,   /* parse a request */
 	CLI_ST_OUTPUT,     /* all states after this one are responses */
 	CLI_ST_PROMPT,     /* display the prompt (first output, same code) */
 	CLI_ST_PRINT,      /* display const message in cli->msg */
@@ -79,6 +81,31 @@ struct cli_print_ctx {
 	const char *msg;        /* pointer to a persistent message to be returned in CLI_ST_PRINT state */
 	char *err;              /* pointer to a 'must free' message to be returned in CLI_ST_PRINT_DYN state */
 	int severity;           /* severity of the message to be returned according to (syslog) rfc5424 */
+};
+
+/* context for the "wait" command that's used to wait for some time on a
+ * condition. We store the start date and the expiration date. The error
+ * value is set by the I/O handler to be printed by the release handler at
+ * the end.
+ */
+enum cli_wait_err {
+	CLI_WAIT_ERR_DONE,       // condition satisfied
+	CLI_WAIT_ERR_INTR,       // interrupted
+	CLI_WAIT_ERR_EXP,        // finished on wait expiration
+	CLI_WAIT_ERR_FAIL,       // finished early (unrecoverable)
+};
+
+enum cli_wait_cond {
+	CLI_WAIT_COND_NONE,      // no condition to wait on
+	CLI_WAIT_COND_SRV_UNUSED,// wait for server to become unused
+};
+
+struct cli_wait_ctx {
+	uint start, deadline;    // both are in ticks.
+	enum cli_wait_cond cond; // CLI_WAIT_COND_*
+	enum cli_wait_err error; // CLI_WAIT_ERR_*
+	char *args[4];           // up to 4 args taken at parse time, all strduped
+	const char *msg;         // static error message for failures if not NULL
 };
 
 struct cli_kw {

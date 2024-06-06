@@ -159,6 +159,13 @@ Core class
    The "core" class is static, it is not possible to create a new object of this
    type.
 
+.. js:attribute:: core.silent
+
+  :returns: integer
+
+  This attribute is an integer, it contains the value -1. It is a special value
+  used to disable logging.
+
 .. js:attribute:: core.emerg
 
   :returns: integer
@@ -2870,18 +2877,7 @@ TXN class
 
   :see: :js:func:`TXN.reply`, :js:class:`Reply`
 
-.. js:function:: TXN.set_loglevel(txn, loglevel)
-
-  Is used to change the log level of the current request. The "loglevel" must
-  be an integer between 0 and 7.
-
-  :param class_txn txn: The class txn object containing the data.
-  :param integer loglevel: The required log level. This variable can be one of
-  :see: :js:attr:`core.emerg`, :js:attr:`core.alert`, :js:attr:`core.crit`,
-    :js:attr:`core.err`, :js:attr:`core.warning`, :js:attr:`core.notice`,
-    :js:attr:`core.info`, :js:attr:`core.debug` (log level definitions)
-
-.. js:function:: TXN.set_tos(txn, tos)
+.. js:function:: TXN.set_fc_tos(txn, tos)
 
   Is used to set the TOS or DSCP field value of packets sent to the client to
   the value passed in "tos" on platforms which support this.
@@ -2889,13 +2885,40 @@ TXN class
   :param class_txn txn: The class txn object containing the data.
   :param integer tos: The new TOS os DSCP.
 
-.. js:function:: TXN.set_mark(txn, mark)
+.. js:function:: TXN.set_fc_mark(txn, mark)
 
   Is used to set the Netfilter MARK on all packets sent to the client to the
   value passed in "mark" on platforms which support it.
 
   :param class_txn txn: The class txn object containing the data.
   :param integer mark: The mark value.
+
+.. js:function:: TXN.set_loglevel(txn, loglevel)
+
+  Is used to change the log level of the current request. The "loglevel" must
+  be an integer between 0 and 7 or the special value -1 to disable logging.
+
+  :param class_txn txn: The class txn object containing the data.
+  :param integer loglevel: The required log level. This variable can be one of
+  :see: :js:attr:`core.silent`, :js:attr:`core.emerg`, :js:attr:`core.alert`,
+    :js:attr:`core.crit`, :js:attr:`core.err`, :js:attr:`core.warning`, :js:attr:`core.notice`,
+    :js:attr:`core.info`, :js:attr:`core.debug` (log level definitions)
+
+.. js:function:: TXN.set_mark(txn, mark)
+
+  Alias for :js:func:`TXN.set_fc_mark()`.
+
+  .. warning::
+     This function is deprecated. :js:func:`TXN.set_fc_mark()` must be used
+     instead.
+
+.. js:function:: TXN.set_tos(txn, tos)
+
+  Alias for :js:func:`TXN.set_fc_tos()`.
+
+  .. warning::
+     This function is deprecated. :js:func:`TXN.set_fc_tos()` must be used
+     instead.
 
 .. js:function:: TXN.set_priority_class(txn, prio)
 
@@ -3906,7 +3929,7 @@ Filter class
 
   This class contains return codes some filter callback functions may return. It
   also contains configuration flags and some helper functions. To understand how
-  the filter API works, see `doc/internal/filters.txt` documentation.
+  the filter API works, see `doc/internals/api/filters.txt` documentation.
 
 .. js:attribute:: filter.CONTINUE
 
@@ -4439,6 +4462,10 @@ CertCache class
   :param string certificate.ocsp: An OCSP response in base64. (cf management.txt)
   :param string certificate.issuer: The certificate of the OCSP issuer.
   :param string certificate.sctl: An SCTL file.
+
+  .. Note::
+     This function may be slow. As such, it may only be used during startup
+     (main or init context) or from a yield-capable runtime context.
 
 .. code-block:: lua
 

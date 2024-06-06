@@ -784,7 +784,7 @@ static int bind_parse_crt(char **args, int cur_arg, struct proxy *px, struct bin
 		return ERR_ALERT | ERR_FATAL;
 	}
 
-	if ((*args[cur_arg + 1] != '/' ) && global_ssl.crt_base) {
+	if ((*args[cur_arg + 1] != '@') && (*args[cur_arg + 1] != '/' ) && global_ssl.crt_base) {
 		if ((strlen(global_ssl.crt_base) + 1 + strlen(args[cur_arg + 1]) + 1) > sizeof(path) ||
 		    snprintf(path, sizeof(path), "%s/%s",  global_ssl.crt_base, args[cur_arg + 1]) > sizeof(path)) {
 			memprintf(err, "'%s' : path too long", args[cur_arg]);
@@ -1473,35 +1473,6 @@ static int bind_parse_no_ca_names(char **args, int cur_arg, struct proxy *px, st
 	return ssl_bind_parse_no_ca_names(args, cur_arg, px, &conf->ssl_conf, 0, err);
 }
 
-
-static int ssl_bind_parse_ocsp_update(char **args, int cur_arg, struct proxy *px,
-                                      struct ssl_bind_conf *ssl_conf, int from_cli, char **err)
-{
-	if (!*args[cur_arg + 1]) {
-		memprintf(err, "'%s' : expecting <on|off>", args[cur_arg]);
-		return ERR_ALERT | ERR_FATAL;
-	}
-
-	if (strcmp(args[cur_arg + 1], "on") == 0)
-		ssl_conf->ocsp_update = SSL_SOCK_OCSP_UPDATE_ON;
-	else if (strcmp(args[cur_arg + 1], "off") == 0)
-		ssl_conf->ocsp_update = SSL_SOCK_OCSP_UPDATE_OFF;
-	else {
-		memprintf(err, "'%s' : expecting <on|off>", args[cur_arg]);
-		return ERR_ALERT | ERR_FATAL;
-	}
-
-	if (ssl_conf->ocsp_update == SSL_SOCK_OCSP_UPDATE_ON) {
-		/* We might need to create the main ocsp update task */
-		int ret = ssl_create_ocsp_update_task(err);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
-}
-
-
 /***************************** "server" keywords Parsing ********************************************/
 
 /* parse the "npn" bind keyword */
@@ -1828,7 +1799,7 @@ static int srv_parse_crt(char **args, int *cur_arg, struct proxy *px, struct ser
 		return ERR_ALERT | ERR_FATAL;
 	}
 
-	if ((*args[*cur_arg + 1] != '/') && global_ssl.crt_base)
+	if ((*args[*cur_arg + 1] != '@') && (*args[*cur_arg + 1] != '/') && global_ssl.crt_base)
 		memprintf(&newsrv->ssl_ctx.client_crt, "%s/%s", global_ssl.crt_base, args[*cur_arg + 1]);
 	else
 		memprintf(&newsrv->ssl_ctx.client_crt, "%s", args[*cur_arg + 1]);
@@ -2093,16 +2064,23 @@ static int ssl_parse_default_server_options(char **args, int section_type, struc
 	return 0;
 }
 
-/* parse the "ca-base" / "crt-base" keywords in global section.
+/* parse the "ca-base" / "crt-base" / "key-base" keywords in global section.
  * Returns <0 on alert, >0 on warning, 0 on success.
  */
-static int ssl_parse_global_ca_crt_base(char **args, int section_type, struct proxy *curpx,
+static int ssl_parse_global_path_base(char **args, int section_type, struct proxy *curpx,
                                         const struct proxy *defpx, const char *file, int line,
                                         char **err)
 {
 	char **target;
 
-	target = (args[0][1] == 'a') ? &global_ssl.ca_base : &global_ssl.crt_base;
+	if (args[0][1] == 'a')
+		target = &global_ssl.ca_base;
+	else if (args[0][1] == 'r')
+		target = &global_ssl.crt_base;
+	else if (args[0][1] == 'e')
+		target = &global_ssl.key_base;
+	else
+		return -1;
 
 	if (too_many_args(1, args, err, NULL))
 		return -1;
@@ -2117,6 +2095,39 @@ static int ssl_parse_global_ca_crt_base(char **args, int section_type, struct pr
 		return -1;
 	}
 	*target = strdup(args[1]);
+	return 0;
+}
+
+/* parse the "ssl-security-level" keyword in global section.  */
+static int ssl_parse_security_level(char **args, int section_type, struct proxy *curpx,
+					 const struct proxy *defpx, const char *file, int linenum,
+					 char **err)
+{
+#ifndef HAVE_SSL_SET_SECURITY_LEVEL
+	memprintf(err, "global statement '%s' requires at least OpenSSL 1.1.1.", args[0]);
+	return -1;
+#else
+	char *endptr;
+
+	if (!*args[1]) {
+		ha_alert("parsing [%s:%d] : '%s' : missing value\n", file, linenum, args[0]);
+		return -1;
+	}
+
+	global_ssl.security_level = strtol(args[1], &endptr, 10);
+	if (*endptr != '\0') {
+		ha_alert("parsing [%s:%d] : '%s' : expects an integer argument, found '%s'\n",
+			 file, linenum, args[0], args[1]);
+		return -1;
+	}
+
+	if (global_ssl.security_level < 0 || global_ssl.security_level > 5) {
+		ha_alert("parsing [%s:%d] : '%s' : expects a value between 0 and 5\n",
+			 file, linenum, args[0]);
+		return -1;
+	}
+#endif
+
 	return 0;
 }
 
@@ -2135,60 +2146,6 @@ static int ssl_parse_skip_self_issued_ca(char **args, int section_type, struct p
 }
 
 
-static int ssl_parse_global_ocsp_maxdelay(char **args, int section_type, struct proxy *curpx,
-                                          const struct proxy *defpx, const char *file, int line,
-                                          char **err)
-{
-	int value = 0;
-
-	if (*(args[1]) == 0) {
-		memprintf(err, "'%s' expects an integer argument.", args[0]);
-		return -1;
-	}
-
-	value = atoi(args[1]);
-	if (value < 0) {
-		memprintf(err, "'%s' expects a positive numeric value.", args[0]);
-		return -1;
-	}
-
-	if (global_ssl.ocsp_update.delay_min > value) {
-		memprintf(err, "'%s' can not be lower than tune.ssl.ocsp-update.mindelay.", args[0]);
-		return -1;
-	}
-
-	global_ssl.ocsp_update.delay_max = value;
-
-	return 0;
-}
-
-static int ssl_parse_global_ocsp_mindelay(char **args, int section_type, struct proxy *curpx,
-                                          const struct proxy *defpx, const char *file, int line,
-                                          char **err)
-{
-	int value = 0;
-
-	if (*(args[1]) == 0) {
-		memprintf(err, "'%s' expects an integer argument.", args[0]);
-		return -1;
-	}
-
-	value = atoi(args[1]);
-	if (value < 0) {
-		memprintf(err, "'%s' expects a positive numeric value.", args[0]);
-		return -1;
-	}
-
-	if (value > global_ssl.ocsp_update.delay_max) {
-		memprintf(err, "'%s' can not be higher than tune.ssl.ocsp-update.maxdelay.", args[0]);
-		return -1;
-	}
-
-	global_ssl.ocsp_update.delay_min = value;
-
-	return 0;
-}
-
 
 
 /* Note: must not be declared <const> as its list will be overwritten.
@@ -2200,7 +2157,12 @@ static int ssl_parse_global_ocsp_mindelay(char **args, int section_type, struct 
  */
 
 /* the <ssl_crtlist_kws> keywords are used for crt-list parsing, they *MUST* be safe
- * with their proxy argument NULL and must only fill the ssl_bind_conf */
+ * with their proxy argument NULL and must only fill the ssl_bind_conf
+ *
+ * /!\ Please update configuration.txt at the crt-list option of the Bind options
+ * section when adding a keyword in ssl_crtlist_kws. /!\
+ *
+ */
 struct ssl_crtlist_kw ssl_crtlist_kws[] = {
 	{ "allow-0rtt",            ssl_bind_parse_allow_0rtt,       0 }, /* allow 0-RTT */
 	{ "alpn",                  ssl_bind_parse_alpn,             1 }, /* set ALPN supported protocols */
@@ -2219,7 +2181,6 @@ struct ssl_crtlist_kw ssl_crtlist_kws[] = {
 	{ "ssl-min-ver",           ssl_bind_parse_tls_method_minmax,1 }, /* minimum version */
 	{ "ssl-max-ver",           ssl_bind_parse_tls_method_minmax,1 }, /* maximum version */
 	{ "verify",                ssl_bind_parse_verify,           1 }, /* set SSL verify method */
-	{ "ocsp-update",           ssl_bind_parse_ocsp_update,      1 }, /* ocsp update mode (on or off) */
 	{ NULL, NULL, 0 },
 };
 
@@ -2325,8 +2286,9 @@ static struct srv_kw_list srv_kws = { "SSL", { }, {
 INITCALL1(STG_REGISTER, srv_register_keywords, &srv_kws);
 
 static struct cfg_kw_list cfg_kws = {ILH, {
-	{ CFG_GLOBAL, "ca-base",  ssl_parse_global_ca_crt_base },
-	{ CFG_GLOBAL, "crt-base", ssl_parse_global_ca_crt_base },
+	{ CFG_GLOBAL, "ca-base",  ssl_parse_global_path_base },
+	{ CFG_GLOBAL, "crt-base", ssl_parse_global_path_base },
+	{ CFG_GLOBAL, "key-base", ssl_parse_global_path_base },
 	{ CFG_GLOBAL, "issuers-chain-path", ssl_load_global_issuers_from_path },
 	{ CFG_GLOBAL, "maxsslconn", ssl_parse_global_int },
 	{ CFG_GLOBAL, "ssl-default-bind-options", ssl_parse_default_bind_options },
@@ -2343,6 +2305,7 @@ static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_GLOBAL, "ssl-provider",  ssl_parse_global_ssl_provider },
 	{ CFG_GLOBAL, "ssl-provider-path",  ssl_parse_global_ssl_provider_path },
 #endif
+	{ CFG_GLOBAL, "ssl-security-level", ssl_parse_security_level },
 	{ CFG_GLOBAL, "ssl-skip-self-issued-ca", ssl_parse_skip_self_issued_ca },
 	{ CFG_GLOBAL, "tune.ssl.cachesize", ssl_parse_global_int },
 #ifndef OPENSSL_NO_DH
@@ -2374,10 +2337,6 @@ static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_GLOBAL, "ssl-default-server-ciphersuites", ssl_parse_global_ciphersuites },
 	{ CFG_GLOBAL, "ssl-load-extra-files", ssl_parse_global_extra_files },
 	{ CFG_GLOBAL, "ssl-load-extra-del-ext", ssl_parse_global_extra_noext },
-#ifndef OPENSSL_NO_OCSP
-	{ CFG_GLOBAL, "tune.ssl.ocsp-update.maxdelay", ssl_parse_global_ocsp_maxdelay },
-	{ CFG_GLOBAL, "tune.ssl.ocsp-update.mindelay", ssl_parse_global_ocsp_mindelay },
-#endif
 	{ 0, NULL, NULL },
 }};
 

@@ -118,6 +118,16 @@
 #define HAVE_SSL_0RTT_QUIC
 #endif
 
+
+#if defined(SSL_CTX_set_security_level) || HA_OPENSSL_VERSION_NUMBER >= 0x1010100fL
+#define HAVE_SSL_SET_SECURITY_LEVEL
+#endif
+
+#if !defined(HAVE_SSL_SET_SECURITY_LEVEL)
+/* define a nope function for set_security_level */
+#define SSL_CTX_set_security_level(ctx, level) ({})
+#endif
+
 #if (HA_OPENSSL_VERSION_NUMBER >= 0x3000000fL)
 #define HAVE_OSSL_PARAM
 #define MAC_CTX EVP_MAC_CTX
@@ -381,6 +391,10 @@ static inline unsigned long ERR_peek_error_func(const char **func)
 #define EVP_CTRL_AEAD_SET_TAG   EVP_CTRL_GCM_SET_TAG
 #endif
 
+#if !defined(EVP_CTRL_AEAD_GET_TAG)
+#define EVP_CTRL_AEAD_GET_TAG EVP_CTRL_GCM_GET_TAG
+#endif
+
 /* Supported hash function for TLS tickets */
 #ifdef OPENSSL_NO_SHA256
 #define TLS_TICKET_HASH_FUNCT EVP_sha1
@@ -490,6 +504,11 @@ static inline unsigned long ERR_peek_error_func(const char **func)
 
 #if !defined(SSL_CTX_set1_sigalgs_list) && defined(SSL_CTRL_SET_SIGALGS_LIST)
 #define SSL_CTX_set1_sigalgs_list SSL_CTX_set1_sigalgs_list
+#endif
+
+#ifndef SSL_CTX_get_tlsext_status_cb
+# define SSL_CTX_get_tlsext_status_cb(ctx, cb) \
+	*(cb) = (void (*) (void))ctx->tlsext_status_cb
 #endif
 
 #endif /* USE_OPENSSL */

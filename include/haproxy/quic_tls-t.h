@@ -21,6 +21,7 @@
 
 #include <import/ebtree.h>
 
+#include <haproxy/buf-t.h>
 #include <haproxy/ncbuf-t.h>
 #include <haproxy/quic_ack-t.h>
 #include <haproxy/openssl-compat.h>
@@ -237,10 +238,12 @@ struct quic_cstream {
 
 struct quic_enc_level {
 	struct list list;
-	/* Attach point to enqueue this encryption level during retransmissions */
-	struct list retrans;
-	/* pointer to list used only during retransmissions */
-	struct list *retrans_frms;
+
+	/* Attach point to register encryption level before sending. */
+	struct list el_send;
+	/* Pointer to the frames used by sending functions */
+	struct list *send_frms;
+
 	/* Encryption level, as defined by the TLS stack. */
 	enum ssl_encryption_level_t level;
 	/* TLS encryption context (AEAD only) */
@@ -254,8 +257,6 @@ struct quic_enc_level {
 		struct eb_root pkts;
 		/* List of QUIC packets with protected header. */
 		struct list pqpkts;
-		/* List of crypto frames received in order. */
-		struct list crypto_frms;
 	} rx;
 
 	/* TX part */

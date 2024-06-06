@@ -3,11 +3,19 @@
  *
  * Copyright 2022 HAProxy Technologies
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2.1 of the License, or (at your option) any later version.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include <haproxy/sample.h>
@@ -106,7 +114,11 @@ static inline int http_7239_extract_ipv4(struct ist *input, struct in_addr *ip)
 {
 	char ip4[INET_ADDRSTRLEN];
 	unsigned char buf[sizeof(struct in_addr)];
+	void *dst = buf;
 	int it = 0;
+
+	if (ip)
+		dst = ip;
 
 	/* extract ipv4 addr */
 	while (it < istlen(*input) && it < (sizeof(ip4) - 1)) {
@@ -117,11 +129,9 @@ static inline int http_7239_extract_ipv4(struct ist *input, struct in_addr *ip)
 		it += 1;
 	}
 	ip4[it] = 0;
-	if (inet_pton(AF_INET, ip4, buf) != 1)
+	if (inet_pton(AF_INET, ip4, dst) != 1)
 		return 0; /* invalid ip4 addr */
 	/* ok */
-	if (ip)
-		memcpy(ip, buf, sizeof(buf));
 	*input = istadv(*input, it);
 	return 1;
 }
@@ -138,7 +148,11 @@ static inline int http_7239_extract_ipv6(struct ist *input, struct in6_addr *ip)
 {
 	char ip6[INET6_ADDRSTRLEN];
 	unsigned char buf[sizeof(struct in6_addr)];
+	void *dst = buf;
 	int it = 0;
+
+	if (ip)
+		dst = ip;
 
 	*input = istnext(*input); /* skip '[' leading char */
 	/* extract ipv6 addr */
@@ -154,11 +168,9 @@ static inline int http_7239_extract_ipv6(struct ist *input, struct in6_addr *ip)
 	if ((istlen(*input)-it) < 1 || istptr(*input)[it] != ']')
 		return 0; /* missing ending "]" char */
 	it += 1;
-	if (inet_pton(AF_INET6, ip6, buf) != 1)
+	if (inet_pton(AF_INET6, ip6, dst) != 1)
 		return 0; /* invalid ip6 addr */
 	/* ok */
-	if (ip)
-		memcpy(ip, buf, sizeof(buf));
 	*input = istadv(*input, it);
 	return 1;
 }

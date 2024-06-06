@@ -27,13 +27,29 @@
 #include <haproxy/dynbuf-t.h>
 #include <haproxy/freq_ctr-t.h>
 #include <haproxy/obj_type-t.h>
+#include <haproxy/task-t.h>
 #include <haproxy/xref-t.h>
 
 /* flags for appctx->state */
-#define APPLET_WANT_DIE     0x01  /* applet was running and requested to die */
 
 /* Room for per-command context (mostly CLI commands but not only) */
-#define APPLET_MAX_SVCCTX 88
+#define APPLET_MAX_SVCCTX 128
+
+/* Appctx Flags */
+#define APPCTX_FL_INBLK_ALLOC    0x00000001
+#define APPCTX_FL_INBLK_FULL     0x00000002
+#define APPCTX_FL_OUTBLK_ALLOC   0x00000004
+#define APPCTX_FL_OUTBLK_FULL    0x00000008
+#define APPCTX_FL_EOI            0x00000010
+#define APPCTX_FL_EOS            0x00000020
+#define APPCTX_FL_ERR_PENDING    0x00000040
+#define APPCTX_FL_ERROR          0x00000080
+#define APPCTX_FL_SHUTDOWN       0x00000100  /* applet was shut down (->release() called if any). No more data exchange with SCs */
+#define APPCTX_FL_WANT_DIE       0x00000200  /* applet was running and requested to die */
+#define APPCTX_FL_INOUT_BUFS     0x00000400  /* applet uses its own buffers */
+#define APPCTX_FL_FASTFWD        0x00000800  /* zero-copy forwarding is in-use, don't fill the outbuf */
+#define APPCTX_FL_IN_MAYALLOC    0x00001000  /* applet may try again to allocate its inbuf */
+#define APPCTX_FL_OUT_MAYALLOC   0x00002000  /* applet may try again to allocate its outbuf */
 
 struct appctx;
 struct proxy;
@@ -49,6 +65,9 @@ struct applet {
 	int (*init)(struct appctx *);      /* callback to init resources, may be NULL.
 					      expect 0 if ok, -1 if an error occurs. */
 	void (*fct)(struct appctx *);      /* internal I/O handler, may never be NULL */
+	size_t (*rcv_buf)(struct appctx *appctx, struct buffer *buf, size_t count, unsigned int flags); /* called from the upper layer to get data */
+	size_t (*snd_buf)(struct appctx *appctx, struct buffer *buf, size_t count, unsigned int flags); /* Called from the upper layet to put data */
+	size_t (*fastfwd)(struct appctx *appctx, struct buffer *buf, size_t count, unsigned int flags); /* Callback to fast-forward data */
 	void (*release)(struct appctx *);  /* callback to release resources, may be NULL */
 	unsigned int timeout;              /* execution timeout. */
 };
@@ -57,9 +76,14 @@ struct applet {
 struct appctx {
 	enum obj_type obj_type;    /* OBJ_TYPE_APPCTX */
 	/* 3 unused bytes here */
-	unsigned short state;      /* Internal appctx state */
 	unsigned int st0;          /* CLI state for stats, session state for peers */
 	unsigned int st1;          /* prompt/payload (bitwise OR of APPCTX_CLI_ST1_*) for stats, session error for peers */
+
+	unsigned int flags;        /* APPCTX_FL_* */
+	struct buffer inbuf;
+	struct buffer outbuf;
+	size_t to_forward;
+
 	struct buffer *chunk;       /* used to store unfinished commands */
 	struct applet *applet;     /* applet this context refers to */
 	struct session *sess;      /* session for frontend applets (NULL for backend applets) */
@@ -75,7 +99,7 @@ struct appctx {
 	struct buffer_wait buffer_wait; /* position in the list of objects waiting for a buffer */
 	struct task *t;                  /* task associated to the applet */
 	struct freq_ctr call_rate;       /* appctx call rate */
-	struct list wait_entry;          /* entry in a list of waiters for an event (e.g. ring events) */
+	struct mt_list wait_entry;       /* entry in a list of waiters for an event (e.g. ring events) */
 
 	/* The pointer seen by application code is appctx->svcctx. In 2.7 the
 	 * anonymous union and the "ctx" struct disappeared, and the struct
