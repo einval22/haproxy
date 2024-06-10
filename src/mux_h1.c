@@ -4376,7 +4376,7 @@ static void h1_shut(struct stconn *sc, enum se_shut_mode mode, struct se_abort_i
 
   do_shutw:
 	h1_close(h1c);
-	if (mode & SE_SHW_NORMAL)
+	if (!(mode & SE_SHW_NORMAL))
 		h1c->flags |= H1C_F_SILENT_SHUT;
 
 	if (!b_data(&h1c->obuf))
@@ -4724,7 +4724,9 @@ static size_t h1_nego_ff(struct stconn *sc, struct buffer *input, size_t count, 
 
 		if (xfer > b_data(input))
 			xfer = b_data(input);
+		h1c->obuf.head += offset;
 		h1s->sd->iobuf.data = b_xfer(&h1c->obuf, input, xfer);
+		h1c->obuf.head -= offset;
 
 		/* Cannot forward more data, wait for room */
 		if (b_data(input))
@@ -4860,7 +4862,7 @@ static int h1_fastfwd(struct stconn *sc, unsigned int count, unsigned int flags)
 	ret = 0;
 
 	if (h1m->state == H1_MSG_DATA && (h1m->flags & (H1_MF_CHNK|H1_MF_CLEN)) &&  count > h1m->curr_len) {
-		flags |= NEGO_FF_FL_EXACT_SIZE;
+		nego_flags |= NEGO_FF_FL_EXACT_SIZE;
 		count = h1m->curr_len;
 	}
 

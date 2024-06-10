@@ -691,7 +691,7 @@ static int qc_prep_pkts(struct quic_conn *qc, struct buffer *buf,
 int qc_send(struct quic_conn *qc, int old_data, struct list *send_list)
 {
 	struct quic_enc_level *qel, *tmp_qel;
-	int ret, status = 0;
+	int ret = 0, status = 0;
 	struct buffer *buf;
 
 	TRACE_ENTER(QUIC_EV_CONN_TXPKT, qc);
@@ -713,7 +713,7 @@ int qc_send(struct quic_conn *qc, int old_data, struct list *send_list)
 	}
 
 	/* Prepare and send packets until we could not further prepare packets. */
-	do {
+	while (!LIST_ISEMPTY(send_list)) {
 		/* Buffer must always be empty before qc_prep_pkts() usage.
 		 * qc_send_ppkts() ensures it is cleared on success.
 		 */
@@ -727,7 +727,12 @@ int qc_send(struct quic_conn *qc, int old_data, struct list *send_list)
 				qc_txb_release(qc);
 			goto out;
 		}
-	} while (ret > 0 && !LIST_ISEMPTY(send_list));
+
+		if (ret <= 0) {
+			TRACE_DEVEL("stopping on qc_prep_pkts() return", QUIC_EV_CONN_TXPKT, qc);
+			break;
+		}
+	}
 
 	qc_txb_release(qc);
 	if (ret < 0)
@@ -1425,6 +1430,7 @@ static int qc_build_frms(struct list *outlist, struct list *inlist,
 	ret = 0;
 	if (*len > room)
 		goto leave;
+	room -= *len;
 
 	/* If we are not probing we must take into an account the congestion
 	 * control window.
@@ -1458,8 +1464,8 @@ static int qc_build_frms(struct list *outlist, struct list *inlist,
 			            QUIC_EV_CONN_BCFRMS, qc, &room, len);
 			/* Compute the length of this CRYPTO frame header */
 			hlen = 1 + quic_int_getsize(cf->crypto.offset);
-			/* Compute the data length of this CRyPTO frame. */
-			dlen = max_stream_data_size(room, *len + hlen, cf->crypto.len);
+			/* Compute the data length of this CRYPTO frame. */
+			dlen = max_stream_data_size(room, hlen, cf->crypto.len);
 			TRACE_DEVEL(" CRYPTO data length (hlen, crypto.len, dlen)",
 			            QUIC_EV_CONN_BCFRMS, qc, &hlen, &cf->crypto.len, &dlen);
 			if (!dlen)
@@ -1550,7 +1556,7 @@ static int qc_build_frms(struct list *outlist, struct list *inlist,
 			hlen = 1 + quic_int_getsize(cf->stream.id) +
 				((cf->type & QUIC_STREAM_FRAME_TYPE_OFF_BIT) ? quic_int_getsize(cf->stream.offset.key) : 0);
 			/* Compute the data length of this STREAM frame. */
-			avail_room = room - hlen - *len;
+			avail_room = room - hlen;
 			if ((ssize_t)avail_room <= 0)
 				continue;
 
