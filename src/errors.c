@@ -457,11 +457,12 @@ void _ha_vdiag_warning(const char *fmt, va_list argp)
 	//warn_exec_path();
 	
 	if (!(warned & WARN_EXEC_PATH) && (global.mode & MODE_STARTING)) {
-		const char *path = get_exec_path();
+		//const char *path = get_exec_path();
+		const char *path = global.argv[0];
 		warned |= WARN_EXEC_PATH;
-		print_message_args(0, "NOTICE", "haproxy version is %s\n", haproxy_version);
+		print_message(0, "NOTICE", "haproxy version is %s\n", haproxy_version);
 		if (path)
-			print_message_args(0, "NOTICE", "path to executable is %s\n", path);
+			print_message(0, "NOTICE", "path to executable is %s\n", path);
 	}
 
 	print_message(1, "DIAG", fmt, argp);
