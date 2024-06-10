@@ -2143,7 +2143,7 @@ static void init(int argc, char **argv)
 		exit(result ? 0 : 1);
 	}
 
-
+// check master worker mode
 	if (global.mode & MODE_MWORKER) {
 		struct mworker_proc *tmproc;
 
@@ -2183,6 +2183,7 @@ static void init(int argc, char **argv)
 	/* In mworkerV3 mode, the configuration is never parsed by the master,
 	 * but is parsed by the worker, the master only configure the master CLI */
 
+	// * ELSE missed not default mode *
 	{
 	int worker;
 	struct mworker_proc *child;
@@ -2220,6 +2221,8 @@ static void init(int argc, char **argv)
 	}
 
 	}
+	
+// read the conf
 	/* in wait mode, we don't try to read the configuration files */
 	if (!(global.mode & MODE_MWORKER_WAIT)) {
 		char *env_cfgfiles = NULL;
