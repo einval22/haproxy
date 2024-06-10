@@ -1038,7 +1038,7 @@ objsize: haproxy
 	$(Q)objdump -t $^|grep ' g '|grep -F '.text'|awk '{print $$5 FS $$6}'|sort
 
 %.o:	%.c $(DEP)
-	$(cmd_CC) $(COPTS) -c -o $@ $<
+	$(cmd_CC) $(COPTS) -O0 -ggdb -c -o $@ $<
 
 admin/halog/halog: admin/halog/halog.o admin/halog/fgets2.o src/ebtree.o src/eb32tree.o src/eb64tree.o src/ebmbtree.o src/ebsttree.o src/ebistree.o src/ebimtree.o
 	$(cmd_LD) $(ARCH_FLAGS) $(LDFLAGS) -o $@ $^ $(LDOPTS)
