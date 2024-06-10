@@ -413,10 +413,14 @@ static void print_message(int use_usermsgs_ctx, const char *label, const char *f
 	free(msg);
 }
 
-/*
- * Display a notice with the happroxy version and executable path when the
- * first message is emitted in starting mode.
- */
+static void print_message_args(int use_usermsgs_ctx, const char *label, const char *fmt, ...)
+{
+	va_list argp;
+	va_start(argp, fmt);
+	print_message(use_usermsgs_ctx, label, fmt, argp);
+	va_end(argp);
+}
+
 
 /*
  * Displays the message on stderr with the pid.
@@ -458,11 +462,9 @@ void _ha_vdiag_warning(const char *fmt, va_list argp)
 	
 	if (!(warned & WARN_EXEC_PATH) && (global.mode & MODE_STARTING)) {
 		//const char *path = get_exec_path();
-		const char *path = global.argv[0];
 		warned |= WARN_EXEC_PATH;
-		print_message(0, "NOTICE", "haproxy version is %s\n", haproxy_version);
-		if (path)
-			print_message(0, "NOTICE", "path to executable is %s\n", path);
+		print_message_args(0, "NOTICE", "haproxy version is %s\n", haproxy_version);
+		print_message_args(0, "NOTICE", "path to executable is %s\n", global.argv[0]);
 	}
 
 	print_message(1, "DIAG", fmt, argp);
