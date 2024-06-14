@@ -2292,8 +2292,8 @@ static void init(int argc, char **argv)
 		}
 	}
 	
-// read the conf
-	// worker parse config, master don't parse
+
+	// WORKER parse its conf
 	/* in wait mode, we don't try to read the configuration files */
 	// CHILD
 	if (!(global.mode & MODE_MWORKER_WAIT)) {
@@ -2375,6 +2375,7 @@ static void init(int argc, char **argv)
 		global.nbthread = 1;
 	}
 
+	// MASTER CLI
 	if (global.mode & (MODE_MWORKER|MODE_MWORKER_WAIT)) {
 		
 		struct wordlist *it, *c;
@@ -3736,22 +3737,40 @@ int main(int argc, char **argv)
 	}
 	*/
 	
+	/* close the pidfile both in children and father */
+	if (pidfd >= 0) {
+		//lseek(pidfd, 0, SEEK_SET);  /* debug: emulate eglibc bug */
+		close(pidfd);
+		ha_notice("%s:%d:%s:  closed pid FD=%d\n", __FILE__, __LINE__, __func__, pidfd);
+	}
+	/* We won't ever use this anymore */
+	ha_free(&global.pidfile);
 	
-
-	// CHROOT for MASTER or DAEMON
-	if ((global.mode & (MODE_MWORKER|MODE_DAEMON)) == 0) {
-		
-		/* chroot if needed */
+	int devnullfd = -1;
+	if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) {
+			devnullfd = open("/dev/null", O_RDWR, 0);
+			if (devnullfd < 0) {
+				ha_alert("Cannot open /dev/null\n");
+				exit(EXIT_FAILURE);
+			}
+	}
+	// master can't chroot because it may do reload later, we need to keep access to binary
+	// DAEMON and child will chroot here
+	ha_notice("%s:%d:%s:  mode=0x%08x\n", __FILE__, __LINE__, __func__, global.mode);
+	if ((global.mode & MODE_MWORKER_WAIT) == 0) {
+		ha_notice("%s:%d:%s: DAEMON and child global.chroot=%s\n", __FILE__, __LINE__, __func__, global.chroot);
 		if (global.chroot != NULL) {
 			if (chroot(global.chroot) == -1 || chdir("/") == -1) {
-				ha_alert("[%s.main()] Cannot chroot(%s).\n", argv[0], global.chroot);
-				if (nb_oldpids)
-					tell_old_pids(SIGTTIN);
-				protocol_unbind_all();
-				exit(1);
+					ha_alert("[%s.main()] Cannot chroot(%s).\n", argv[0], global.chroot);
+					if (nb_oldpids)
+						tell_old_pids(SIGTTIN);
+					protocol_unbind_all();
+					exit(1);
 			}
 		}
 	}
+	
+	ha_free(&global.chroot);
 
 	if (nb_oldpids && !(global.mode & MODE_MWORKER_WAIT))
 		nb_oldpids = tell_old_pids(oldpids_sig);
@@ -3764,16 +3783,24 @@ int main(int argc, char **argv)
 	 * be able to restart the old pids.
 	 */
 
-	// SET_ID for MASTER OR DAEMON
-	if ((global.mode & (MODE_MWORKER | MODE_DAEMON)) == 0) {
-		ha_notice("%s:%d:%s: MASTER: try to set EUID\n", __FILE__, __LINE__, __func__);
+	
+	// Daemon and child could set EUID/GID + caps here 
+	ha_notice("%s:%d:%s:  mode=0x%08x\n", __FILE__, __LINE__, __func__, global.mode);
+	ha_notice("%s:%d:%s: UID=%d, GID=%d\n", __FILE__, __LINE__, __func__, getuid(), getgid());
+	if ((global.mode & MODE_MWORKER_WAIT) == 0) {
+		ha_notice("%s:%d:%s: DAEMON and child will try to set EUID \n", __FILE__, __LINE__, __func__);
 		set_identity(argv[0]);
 	}
 
+
+	// This should pass for child or daemon as they parsed config and already applied UID/GID, caps
+	// master does not parse config, so global.last_checks = 0 ?? and this should pass as well ??
 	/* set_identity() above might have dropped LSTCHK_NETADM or/and
 	 * LSTCHK_SYSADM if it changed to a new UID while preserving enough
 	 * permissions to honnor LSTCHK_NETADM/LSTCHK_SYSADM.
 	 */
+	ha_notice("%s:%d:%s: global.last_checks=0x%08x\n", __FILE__, __LINE__, __func__, global.last_checks);
+	ha_notice("%s:%d:%s: UID=%d, GID=%d\n", __FILE__, __LINE__, __func__, getuid(), getgid());
 	if ((global.last_checks & (LSTCHK_NETADM|LSTCHK_SYSADM)) && getuid()) {
 		/* If global.uid is present in config, it is already set as euid
 		 * and ruid by set_identity() just above, so it's better to
@@ -3825,22 +3852,21 @@ int main(int argc, char **argv)
 	}
 
 	/* update the ready date a last time to also account for final setup time */
+	ha_notice("%s:%d:%s: Set limits and update clock\n", __FILE__, __LINE__, __func__);
 	clock_update_date(0, 1);
 	clock_adjust_now_offset();
 	ready_date = date;
-	
-	ha_notice("%s:%d:%s: Set limits and update clock\n", __FILE__, __LINE__, __func__);
-	
-	/* close the pidfile both in children and father */
-	if (pidfd >= 0) {
-		//lseek(pidfd, 0, SEEK_SET);  /* debug: emulate eglibc bug */
-		close(pidfd);
-		ha_notice("%s:%d:%s:  closed pid FD=%d\n", __FILE__, __LINE__, __func__, pidfd);
-	}
-	/* We won't ever use this anymore */
-	ha_free(&global.pidfile);
 
-	if (global.mode & (MODE_DAEMON | MODE_MWORKER | MODE_MWORKER_WAIT)) {
+	/* close the pidfile both in children and father */
+	//if (pidfd >= 0) {
+		//lseek(pidfd, 0, SEEK_SET);  /* debug: emulate eglibc bug */
+	//	close(pidfd);
+	//	ha_notice("%s:%d:%s:  closed pid FD=%d\n", __FILE__, __LINE__, __func__, pidfd);
+	//}
+	/* We won't ever use this anymore */
+	//ha_free(&global.pidfile);
+
+	
 		
 		//int ret = 0;
 		/*
@@ -3915,79 +3941,80 @@ int main(int argc, char **argv)
 		//	in_parent = 1;
 		//}
 
-		if (in_parent) {
-			if (global.mode & (MODE_MWORKER|MODE_MWORKER_WAIT)) {
-				master = 1;
-				setenv("HAPROXY_LOAD_SUCCESS", "1", 1);
-				proc_self->failedreloads = 0; /* reset the number of failure, proc_self  points to master here */ // ?
-				ha_notice("Loading success.\n");
+	if (in_parent) {
+		if (global.mode & (MODE_MWORKER|MODE_MWORKER_WAIT)) {
+			master = 1;
+			setenv("HAPROXY_LOAD_SUCCESS", "1", 1);
+			proc_self->failedreloads = 0; /* reset the number of failure, proc_self  points to master here */ // ?
+			ha_notice("Loading success.\n");
+			
+			if ((!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) &&
+				(global.mode & MODE_DAEMON)) {
+				/* detach from the tty, this is required to properly daemonize. */
+				if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL))
+					stdio_quiet(-1);
+
+				global.mode &= ~MODE_VERBOSE;
+				global.mode |= MODE_QUIET; /* ensure that we won't say anything from now */
+			}
+
+			// MODE_MWORKER_WAIT means after fork()
+			if (global.mode & MODE_MWORKER_WAIT) {
+				/* only the wait mode handles the master CLI */
 				
-				if ((!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) &&
-					(global.mode & MODE_DAEMON)) {
-					/* detach from the tty, this is required to properly daemonize. */
-					if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL))
-						stdio_quiet(-1);
-
-					global.mode &= ~MODE_VERBOSE;
-					global.mode |= MODE_QUIET; /* ensure that we won't say anything from now */
-				}
-
-				if (global.mode & MODE_MWORKER_WAIT) {
-					/* only the wait mode handles the master CLI */
-					
-					mworker_loop();
-				} else {
+				mworker_loop();
+			} else {
 
 #if defined(USE_SYSTEMD)
-					if (global.tune.options & GTUNE_USE_SYSTEMD)
-						sd_notifyf(0, "READY=1\nMAINPID=%lu\nSTATUS=Ready.\n", (unsigned long)getpid());
+				if (global.tune.options & GTUNE_USE_SYSTEMD)
+					sd_notifyf(0, "READY=1\nMAINPID=%lu\nSTATUS=Ready.\n", (unsigned long)getpid());
 #endif
-					/* if not in wait mode, reload in wait mode to free the memory */
+				/* if not in wait mode, reload in wait mode to free the memory */
 
 //					mworker_reexec_waitmode();
-				}
-				/* should never get there */
-				exit(EXIT_FAILURE);
 			}
+			/* should never get there */
+			exit(EXIT_FAILURE);
+		}
 #if defined(USE_OPENSSL) && !defined(OPENSSL_NO_DH)
-			ssl_free_dh();
+		ssl_free_dh();
 #endif
-			exit(0); /* parent must leave */
-		}
+		exit(0); /* parent must leave */
+	}
 
-		// TODO: check when its executed
-		/* child must never use the atexit function */
-		atexit_flag = 0;
+	// TODO: check when its executed, 
+	/* child must never use the atexit function */
+	//atexit_flag = 0;
 
-		/* close useless master sockets */
-		if (global.mode & MODE_MWORKER) {
-			struct mworker_proc *child, *it;
-			master = 0;
+	/* close useless master sockets */
+	if (global.mode & MODE_MWORKER) {
+		struct mworker_proc *child, *it;
+		master = 0;
 
-			mworker_cli_proxy_stop();
+		mworker_cli_proxy_stop();
 
-			/* free proc struct of other processes  */
-			list_for_each_entry_safe(child, it, &proc_list, list) {
-				/* close the FD of the master side for all
-				 * workers, we don't need to close the worker
-				 * side of other workers since it's done with
-				 * the bind_proc */
-				if (child->ipc_fd[0] >= 0) {
-					close(child->ipc_fd[0]);
-					child->ipc_fd[0] = -1;
-				}
-				if (child->options & PROC_O_TYPE_WORKER && child->reloads == 0 && child->pid == -1) {
-					/* keep this struct if this is our pid */
-					proc_self = child;
-					continue;
-				}
-				LIST_DELETE(&child->list);
-				mworker_free_child(child);
-				child = NULL;
+		/* free proc struct of other processes  */
+		list_for_each_entry_safe(child, it, &proc_list, list) {
+			/* close the FD of the master side for all
+			 * workers, we don't need to close the worker
+			 * side of other workers since it's done with
+			 * the bind_proc */
+			if (child->ipc_fd[0] >= 0) {
+				close(child->ipc_fd[0]);
+				child->ipc_fd[0] = -1;
 			}
+			if (child->options & PROC_O_TYPE_WORKER && child->reloads == 0 && child->pid == -1) {
+				/* keep this struct if this is our pid */
+				proc_self = child;
+				continue;
+			}
+			LIST_DELETE(&child->list);
+			mworker_free_child(child);
+			child = NULL;
 		}
+	}
 
-	} /*  if (global.mode & (MODE_DAEMON | MODE_MWORKER | MODE_MWORKER_WAIT)) */
+	//} /*  if (global.mode & (MODE_DAEMON | MODE_MWORKER | MODE_MWORKER_WAIT)) */
 
 	// WORKER's code
 	/* pass through every cli socket, and check if it's bound to
@@ -3997,18 +4024,19 @@ int main(int argc, char **argv)
 	
 	// TODO: check when its executed
 	/* child must never use the atexit function */
-	atexit_flag = 0;
+	//atexit_flag = 0;
 	 
 	/* close the pidfile both in children and father */
-	if (pidfd >= 0) {
+	//if (pidfd >= 0) {
 		//lseek(pidfd, 0, SEEK_SET);  /* debug: emulate eglibc bug */
-		close(pidfd);
-		ha_notice("%s:%d:%s:  closed pid FD=%d\n", __FILE__, __LINE__, __func__, pidfd);
-	}
+	//	close(pidfd);
+	//	ha_notice("%s:%d:%s:  closed pid FD=%d\n", __FILE__, __LINE__, __func__, pidfd);
+	//}
 
 	/* We won't ever use this anymore */
-	ha_free(&global.pidfile);
+	//ha_free(&global.pidfile);
 	
+	/*
 	int devnullfd = -1;
 	if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) {
 			devnullfd = open("/dev/null", O_RDWR, 0);
@@ -4018,23 +4046,22 @@ int main(int argc, char **argv)
 			}
 	}
 
-	/* Must chroot and setgid/setuid in the children */
-	/* chroot if needed */
+	// Must chroot and setgid/setuid in the children
+	// chroot if needed
 	// CHROOT for CHILD
-	if (global.chroot != NULL) {
-		if (chroot(global.chroot) == -1 || chdir("/") == -1) {
-			ha_alert("[%s.main()] Cannot chroot(%s).\n", argv[0], global.chroot);
+	//if (global.chroot != NULL) {
+	//	if (chroot(global.chroot) == -1 || chdir("/") == -1) {
+	//		ha_alert("[%s.main()] Cannot chroot(%s).\n", argv[0], global.chroot);
 			if (nb_oldpids)
 				tell_old_pids(SIGTTIN);
 			protocol_unbind_all();
 			exit(1);
 		}
 	}
+	*/
 
-	ha_free(&global.chroot);
-
-	ha_notice("%s:%d:%s: SET ID for CHILD\n", __FILE__, __LINE__, __func__);
-	set_identity(argv[0]);
+	//ha_notice("%s:%d:%s: SET ID for CHILD\n", __FILE__, __LINE__, __func__);
+	//set_identity(argv[0]);
 	
 
 	/*
@@ -4046,8 +4073,8 @@ int main(int argc, char **argv)
 	 * affected to listening sockets
 	 */
 	
-	if ((global.mode & MODE_DAEMON) &&
-		(!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))) {
+	// stdio_quiet called after chroot ??
+	if ((global.mode & MODE_DAEMON) && (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))) {
 		/* detach from the tty */
 		stdio_quiet(devnullfd);
 		global.mode &= ~MODE_VERBOSE;
