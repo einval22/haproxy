@@ -2188,20 +2188,7 @@ static void init(int argc, char **argv)
 	 * but is parsed by the worker, the master only configure the master CLI */
 	 
 	 
-	/* open log & pid files before the chroot */
-	if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) && global.pidfile != NULL) {
-	//if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) &&
-	//    !(global.mode & MODE_MWORKER_WAIT) && global.pidfile != NULL) {
-		unlink(global.pidfile);
-		pidfd = open(global.pidfile, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-		if (pidfd < 0) {
-			ha_alert("[%s.main()] Cannot create pidfile %s\n", argv[0], global.pidfile);
-			if (nb_oldpids)
-				tell_old_pids(SIGTTIN);
-			protocol_unbind_all();
-			exit(1);
-		}
-	}
+	
 
 	//if (global.mode & (MODE_DAEMON | MODE_MWORKER | MODE_MWORKER_WAIT)) {
 	if (global.mode & MODE_DAEMON) {
@@ -2231,17 +2218,25 @@ static void init(int argc, char **argv)
 	}
 
 	/* if in master-worker mode, write the PID of the father */
-	// can simplify see above
-	if (global.mode & (MODE_MWORKER | MODE_DAEMON)) {
+	/* open log & pid files before the chroot */
+	if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) && global.pidfile != NULL) {
+	//if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) &&
+	//    !(global.mode & MODE_MWORKER_WAIT) && global.pidfile != NULL) {
+		unlink(global.pidfile);
+		pidfd = open(global.pidfile, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+		if (pidfd < 0) {
+			ha_alert("[%s.main()] Cannot create pidfile %s\n", argv[0], global.pidfile);
+			if (nb_oldpids)
+				tell_old_pids(SIGTTIN);
+			protocol_unbind_all();
+			exit(1);
+		}
 		char pidstr[100];
 		snprintf(pidstr, sizeof(pidstr), "%d\n", (int)getpid());
-		if (pidfd >= 0) {
-			DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
-			ha_notice("%s:%d:%s:  written pidstr %s to pid FD=%d\n", __FILE__, __LINE__, __func__, pidstr, pidfd);
-		}
+		DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
+		ha_notice("%s:%d:%s:  written pidstr %s to pid FD=%d\n", __FILE__, __LINE__, __func__, pidstr, pidfd);
+		
 	}
-	
-	
 
 	if (global.mode & MODE_MWORKER) {
 		int worker_pid;
@@ -2290,6 +2285,7 @@ static void init(int argc, char **argv)
 				if (pidfd >= 0) {
 					char pidstr[100];
 					snprintf(pidstr, sizeof(pidstr), "%d\n", worker_pid);
+					ha_notice("%s:%d:%s: child's PID=%d written\n", __FILE__, __LINE__, __func__, worker_pid);
 					DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
 				}	
 				
@@ -3760,9 +3756,9 @@ int main(int argc, char **argv)
 	}
 	// master can't chroot because it may do reload later, we need to keep access to binary
 	// DAEMON and child will chroot here
-	ha_notice("%s:%d:%s:  mode=0x%08x\n", __FILE__, __LINE__, __func__, global.mode);
+	ha_notice("%s:%d:%s: before chroot, mode=0x%08x\n", __FILE__, __LINE__, __func__, global.mode);
 	if ((global.mode & MODE_MWORKER_WAIT) == 0) {
-		ha_notice("%s:%d:%s: DAEMON and child global.chroot=%s\n", __FILE__, __LINE__, __func__, global.chroot);
+		ha_notice("%s:%d:%s: DAEMON and child do global.chroot=%s\n", __FILE__, __LINE__, __func__, global.chroot);
 		if (global.chroot != NULL) {
 			if (chroot(global.chroot) == -1 || chdir("/") == -1) {
 					ha_alert("[%s.main()] Cannot chroot(%s).\n", argv[0], global.chroot);
