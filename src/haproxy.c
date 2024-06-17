@@ -2203,16 +2203,18 @@ static void init(int argc, char **argv)
 		}
 	}
 
-	if (global.mode & (MODE_DAEMON | MODE_MWORKER | MODE_MWORKER_WAIT)) {
+	//if (global.mode & (MODE_DAEMON | MODE_MWORKER | MODE_MWORKER_WAIT)) {
+	if (global.mode & MODE_DAEMON) {
 		int ret = 0;
 		/*
 		 * if daemon + mworker: must fork here to let a master
 		 * process live in background before forking children
 		 */
 		// daemon's fork
-		if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL)
-		    && (global.mode & MODE_MWORKER)
-		    && (global.mode & MODE_DAEMON)) {
+		if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL) && (global.mode & MODE_DAEMON)) {
+		//if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL)
+		//    && (global.mode & MODE_MWORKER)
+		//    && (global.mode & MODE_DAEMON)) {
 			ret = fork();
 			if (ret < 0) {
 				ha_alert("[%s.main()] Cannot fork.\n", argv[0]);
@@ -2226,17 +2228,19 @@ static void init(int argc, char **argv)
 				ha_notice("%s:%d:%s:  change the process group ID in the child (master process)\n", __FILE__, __LINE__, __func__);
 			}
 		}
+	}
 
-		/* if in master-worker mode, write the PID of the father */
-		if (global.mode & MODE_MWORKER) {
-			char pidstr[100];
-			snprintf(pidstr, sizeof(pidstr), "%d\n", (int)getpid());
-			if (pidfd >= 0) {
-				DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
-				ha_notice("%s:%d:%s:  written pidstr %s to pid FD=%d\n", __FILE__, __LINE__, __func__, pidstr, pidfd);
-			}
+	/* if in master-worker mode, write the PID of the father */
+	// can simplify see above
+	if (global.mode & (MODE_MWORKER | MODE_DAEMON)) {
+		char pidstr[100];
+		snprintf(pidstr, sizeof(pidstr), "%d\n", (int)getpid());
+		if (pidfd >= 0) {
+			DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
+			ha_notice("%s:%d:%s:  written pidstr %s to pid FD=%d\n", __FILE__, __LINE__, __func__, pidstr, pidfd);
 		}
 	}
+	
 	
 
 	if (global.mode & MODE_MWORKER) {
