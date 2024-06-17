@@ -1172,6 +1172,79 @@ next_dir_entry:
 	free(err);
 }
 
+static int read_cfg(char *progname) {
+	char *env_cfgfiles = NULL;
+	int env_err = 0;
+	struct wordlist *wl;
+	int err_code = 0;
+
+	ha_notice("Loading configuration...\n");
+	/* handle cfgfiles that are actually directories */
+	cfgfiles_expand_directories();
+
+	if (LIST_ISEMPTY(&cfg_cfgfiles))
+		usage(progname);
+
+	/* temporary create environment variables with default
+	 * values to ease user configuration. Do not forget to
+	 * unset them after the list_for_each_entry loop.
+	 */
+	setenv("HAPROXY_HTTP_LOG_FMT", default_http_log_format, 1);
+	setenv("HAPROXY_HTTPS_LOG_FMT", default_https_log_format, 1);
+	setenv("HAPROXY_TCP_LOG_FMT", default_tcp_log_format, 1);
+	setenv("HAPROXY_BRANCH", PRODUCT_BRANCH, 1);
+	list_for_each_entry(wl, &cfg_cfgfiles, list) {
+		int ret;
+
+		if (env_err == 0) {
+			if (!memprintf(&env_cfgfiles, "%s%s%s",
+					   (env_cfgfiles ? env_cfgfiles : ""),
+					   (env_cfgfiles ? ";" : ""), wl->s))
+				env_err = 1;
+		}
+
+		ret = readcfgfile(wl->s);
+		if (ret == -1) {
+			ha_alert("Could not open configuration file %s : %s\n",
+				 wl->s, strerror(errno));
+			free(env_cfgfiles);
+			exit(1);
+		}
+		if (ret & (ERR_ABORT|ERR_FATAL))
+			ha_alert("Error(s) found in configuration file : %s\n", wl->s);
+		err_code |= ret;
+		if (err_code & ERR_ABORT) {
+			free(env_cfgfiles);
+			exit(1);
+		}
+	}
+	/* remove temporary environment variables. */
+	unsetenv("HAPROXY_BRANCH");
+	unsetenv("HAPROXY_HTTP_LOG_FMT");
+	unsetenv("HAPROXY_HTTPS_LOG_FMT");
+	unsetenv("HAPROXY_TCP_LOG_FMT");
+
+	/* do not try to resolve arguments nor to spot inconsistencies when
+	 * the configuration contains fatal errors caused by files not found
+	 * or failed memory allocations.
+	 */
+	if (err_code & (ERR_ABORT|ERR_FATAL)) {
+		ha_alert("Fatal errors found in configuration.\n");
+		free(env_cfgfiles);
+		exit(1);
+	}
+	if (env_err) {
+		ha_alert("Could not allocate memory for HAPROXY_CFGFILES env variable\n");
+		exit(1);
+	}
+	setenv("HAPROXY_CFGFILES", env_cfgfiles, 1);
+	free(env_cfgfiles);
+	
+	ha_notice("%s:%d:%s: Finished\n", __FILE__, __LINE__, __func__);
+
+	return err_code;
+}
+
 /*
  * copy and cleanup the current argv
  * Remove the -sf /-st / -x parameters
@@ -2016,7 +2089,6 @@ static void init(int argc, char **argv)
 {
 	char *progname = global.log_tag.area;
 	int err_code = 0;
-	struct wordlist *wl;
 	struct proxy *px;
 	struct post_check_fct *pcf;
 	struct pre_check_fct *prcf;
@@ -2147,6 +2219,20 @@ static void init(int argc, char **argv)
 		exit(result ? 0 : 1);
 	}
 
+	// DAEMON or master parses its conf
+	/* in wait mode, we don't try to read the configuration files */
+	// CHILD
+	//if (global.mode & (MODE_MWORKER | MODE_DAEMON)) {
+	// err_code maybe obtained from read_cfg and parsed in future in case of warnings
+
+	// TODO: register section for master and for worker
+	if (!(global.mode & (MODE_MWORKER |MODE_MWORKER_WAIT))) {
+		read_cfg(progname);
+		ha_notice("%s:%d:%s: Parsed CONFIG !\n", __FILE__, __LINE__, __func__);
+	}
+	//}
+	
+
 // check master worker mode
 	if (global.mode & MODE_MWORKER) {
 		struct mworker_proc *tmproc;
@@ -2259,6 +2345,8 @@ static void init(int argc, char **argv)
 				/* This one must not be exported, it's internal! */
 				unsetenv("HAPROXY_MWORKER_REEXEC");
 				ha_random_jump96(1);
+				read_cfg(progname);
+				ha_notice("%s:%d:%s: Child parsed config !\n", __FILE__, __LINE__, __func__);
 
 				break;
 			default:
@@ -2290,80 +2378,6 @@ static void init(int argc, char **argv)
 				}	
 				
 		}
-	}
-	
-
-	// WORKER parse its conf
-	/* in wait mode, we don't try to read the configuration files */
-	// CHILD
-	if (!(global.mode & MODE_MWORKER_WAIT)) {
-		char *env_cfgfiles = NULL;
-		int env_err = 0;
-
-		ha_notice("Loading configuration...\n");
-		/* handle cfgfiles that are actually directories */
-		cfgfiles_expand_directories();
-
-		if (LIST_ISEMPTY(&cfg_cfgfiles))
-			usage(progname);
-
-		/* temporary create environment variables with default
-		 * values to ease user configuration. Do not forget to
-		 * unset them after the list_for_each_entry loop.
-		 */
-		setenv("HAPROXY_HTTP_LOG_FMT", default_http_log_format, 1);
-		setenv("HAPROXY_HTTPS_LOG_FMT", default_https_log_format, 1);
-		setenv("HAPROXY_TCP_LOG_FMT", default_tcp_log_format, 1);
-		setenv("HAPROXY_BRANCH", PRODUCT_BRANCH, 1);
-		list_for_each_entry(wl, &cfg_cfgfiles, list) {
-			int ret;
-
-			if (env_err == 0) {
-				if (!memprintf(&env_cfgfiles, "%s%s%s",
-					       (env_cfgfiles ? env_cfgfiles : ""),
-					       (env_cfgfiles ? ";" : ""), wl->s))
-					env_err = 1;
-			}
-
-			ret = readcfgfile(wl->s);
-			if (ret == -1) {
-				ha_alert("Could not open configuration file %s : %s\n",
-					 wl->s, strerror(errno));
-				free(env_cfgfiles);
-				exit(1);
-			}
-			if (ret & (ERR_ABORT|ERR_FATAL))
-				ha_alert("Error(s) found in configuration file : %s\n", wl->s);
-			err_code |= ret;
-			if (err_code & ERR_ABORT) {
-				free(env_cfgfiles);
-				exit(1);
-			}
-		}
-		/* remove temporary environment variables. */
-		unsetenv("HAPROXY_BRANCH");
-		unsetenv("HAPROXY_HTTP_LOG_FMT");
-		unsetenv("HAPROXY_HTTPS_LOG_FMT");
-		unsetenv("HAPROXY_TCP_LOG_FMT");
-
-		/* do not try to resolve arguments nor to spot inconsistencies when
-		 * the configuration contains fatal errors caused by files not found
-		 * or failed memory allocations.
-		 */
-		if (err_code & (ERR_ABORT|ERR_FATAL)) {
-			ha_alert("Fatal errors found in configuration.\n");
-			free(env_cfgfiles);
-			exit(1);
-		}
-		if (env_err) {
-			ha_alert("Could not allocate memory for HAPROXY_CFGFILES env variable\n");
-			exit(1);
-		}
-		setenv("HAPROXY_CFGFILES", env_cfgfiles, 1);
-		free(env_cfgfiles);
-		
-		ha_notice("%s:%d:%s: Child parsed config \n", __FILE__, __LINE__, __func__);
-
 	}
 
 	if (global.mode & MODE_MWORKER_WAIT) {
@@ -3772,6 +3786,7 @@ int main(int argc, char **argv)
 	
 	ha_free(&global.chroot);
 
+	// send USR1 or TERM to old process
 	if (nb_oldpids && !(global.mode & MODE_MWORKER_WAIT))
 		nb_oldpids = tell_old_pids(oldpids_sig);
 
