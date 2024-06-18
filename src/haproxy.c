@@ -779,6 +779,7 @@ static void mworker_reexec(int hardreload)
 
 	/* insert the new options just after argv[0] in case we have a -- */
 
+	// TODO: check if we need to check this var ??
 	if (getenv("HAPROXY_MWORKER_WAIT_ONLY") == NULL) {
 		/* add -sf <PID>*  to argv */
 		if (mworker_child_nb() > 0) {
@@ -838,6 +839,7 @@ static void mworker_reexec_waitmode()
 	mworker_reexec(0);
 }
 
+// TODO: move to mworker.c
 /* reload haproxy and emit a warning */
 void mworker_reload(int hardreload)
 {
