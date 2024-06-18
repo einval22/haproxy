@@ -781,35 +781,35 @@ static void mworker_reexec(int hardreload)
 	/* insert the new options just after argv[0] in case we have a -- */
 
 	// TODO: check if we need to check this var ??
-	if (getenv("HAPROXY_MWORKER_WAIT_ONLY") == NULL) {
+	//if (getenv("HAPROXY_MWORKER_WAIT_ONLY") == NULL) {
 		/* add -sf <PID>*  to argv */
-		if (mworker_child_nb() > 0) {
-			struct mworker_proc *child;
+	if (mworker_child_nb() > 0) {
+		struct mworker_proc *child;
 
-			if (hardreload)
-				next_argv[next_argc++] = "-st";
-			else
-				next_argv[next_argc++] = "-sf";
+		if (hardreload)
+			next_argv[next_argc++] = "-st";
+		else
+			next_argv[next_argc++] = "-sf";
 
-			list_for_each_entry(child, &proc_list, list) {
-				if (!(child->options & PROC_O_LEAVING) && (child->options & PROC_O_TYPE_WORKER))
-					current_child = child;
+		list_for_each_entry(child, &proc_list, list) {
+			if (!(child->options & PROC_O_LEAVING) && (child->options & PROC_O_TYPE_WORKER))
+				current_child = child;
 
-				if (!(child->options & (PROC_O_TYPE_WORKER|PROC_O_TYPE_PROG)) || child->pid <= -1)
-					continue;
-				if ((next_argv[next_argc++] = memprintf(&msg, "%d", child->pid)) == NULL)
-					goto alloc_error;
-				msg = NULL;
-			}
-		}
-		if (!x_off && current_child) {
-			/* add the -x option with the socketpair of the current worker */
-			next_argv[next_argc++] = "-x";
-			if ((next_argv[next_argc++] = memprintf(&msg, "sockpair@%d", current_child->ipc_fd[0])) == NULL)
+			if (!(child->options & (PROC_O_TYPE_WORKER|PROC_O_TYPE_PROG)) || child->pid <= -1)
+				continue;
+			if ((next_argv[next_argc++] = memprintf(&msg, "%d", child->pid)) == NULL)
 				goto alloc_error;
 			msg = NULL;
 		}
 	}
+	if (!x_off && current_child) {
+		/* add the -x option with the socketpair of the current worker */
+		next_argv[next_argc++] = "-x";
+		if ((next_argv[next_argc++] = memprintf(&msg, "sockpair@%d", current_child->ipc_fd[0])) == NULL)
+			goto alloc_error;
+		msg = NULL;
+	}
+	//}
 
 	if (x_off) {
 		/* if the cmdline contained a -x /dev/null, continue to use it */
