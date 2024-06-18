@@ -3739,6 +3739,7 @@ int main(int argc, char **argv)
 
 	/* MODE_QUIET can inhibit alerts and warnings below this line */
 
+	// TRUE for master process (set in fork())
 	if (getenv("HAPROXY_MWORKER_REEXEC") != NULL) {
 		/* either stdin/out/err are already closed or should stay as they are. */
 		if ((global.mode & MODE_DAEMON)) {
