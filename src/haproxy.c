@@ -2141,11 +2141,12 @@ static void init(int argc, char **argv)
 				    | MODE_DIAG | MODE_CHECK_CONDITION | MODE_DUMP_LIBS | MODE_DUMP_KWD
 				    | MODE_DUMP_CFG | MODE_DUMP_NB_L));
 
-	if (getenv("HAPROXY_MWORKER_WAIT_ONLY")) {
-		unsetenv("HAPROXY_MWORKER_WAIT_ONLY");
-		global.mode |= MODE_MWORKER_WAIT;
-		global.mode &= ~MODE_MWORKER;
-	}
+	// why WAIT_ONLY ?? HAPROXY_MWORKER_WAIT
+	//if (getenv("HAPROXY_MWORKER_WAIT_ONLY")) {
+	//	unsetenv("HAPROXY_MWORKER_WAIT_ONLY");
+	//	global.mode |= MODE_MWORKER_WAIT;
+	//	global.mode &= ~MODE_MWORKER;
+	//}
 	
 	ha_notice("%s:%d:%s: >>> MODE=0x%08x\n", __FILE__, __LINE__, __func__, global.mode);
 
