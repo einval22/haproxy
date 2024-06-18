@@ -954,6 +954,7 @@ void reexec_on_failure()
 /*
  * Exit with an error message upon a wait-mode failure.
  */
+ // post-fork state, master peut mourir juste avec ALERT
 void exit_on_waitmode_failure()
 {
 	if (!atexit_flag)
