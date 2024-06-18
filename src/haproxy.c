@@ -834,11 +834,13 @@ alloc_error:
 }
 
 /* reexec haproxy in waitmode */
+/*
 static void mworker_reexec_waitmode()
 {
 	setenv("HAPROXY_MWORKER_WAIT_ONLY", "1", 1);
 	mworker_reexec(0);
 }
+*/
 
 // TODO: move to mworker.c
 /* reload haproxy and emit a warning */
