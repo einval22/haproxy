@@ -1650,8 +1650,10 @@ static void init_early(int argc, char **argv)
 	global.mode = MODE_STARTING;
 
 	/* if we were in mworker mode, we should restart in mworker mode */
-	if (getenv("HAPROXY_MWORKER_REEXEC") != NULL)
+	if (getenv("HAPROXY_MWORKER_REEXEC") != NULL) {
 		global.mode |= MODE_MWORKER;
+		global.mode |= MODE_MWORKER_WAIT; /* fork was done in previous master's life */
+	}
 
 	/* initialize date, time, and pid */
 	tzset();
