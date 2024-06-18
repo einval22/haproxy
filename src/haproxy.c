@@ -238,7 +238,8 @@ static int oldpids_sig; /* use USR1 or TERM */
 /* Path to the unix socket we use to retrieve listener sockets from the old process */
 static const char *old_unixsocket;
 
-int atexit_flag = 0;
+// no need to init as 0 ?? as in .BSS
+int atexit_flag = 0; 
 
 int nb_oldpids = 0;
 const int zero = 0;
@@ -2142,15 +2143,20 @@ static void init(int argc, char **argv)
 	ha_notice("%s:%d:%s: >>> MODE=0x%08x\n", __FILE__, __LINE__, __func__, global.mode);
 
 	/* set the atexit functions when not doing configuration check */
-	if (!(global.mode & (MODE_CHECK | MODE_CHECK_CONDITION))
-	    && (getenv("HAPROXY_MWORKER_REEXEC") != NULL)) {
+	// so this is MWORKER mode => show alert on exit
+	if (!(global.mode & (MODE_CHECK | MODE_CHECK_CONDITION)) && (global.mode & MODE_MWORKER)) {
+	//if (!(global.mode & (MODE_CHECK | MODE_CHECK_CONDITION)) && (getenv("HAPROXY_MWORKER_REEXEC") != NULL)) {
 
-		if (global.mode & MODE_MWORKER) {
-			atexit_flag = 0;
-		} else if (global.mode & MODE_MWORKER_WAIT) {
-			atexit_flag = 1;
-			atexit(exit_on_waitmode_failure);
-		}
+		//if (global.mode & MODE_MWORKER) {
+		//	atexit_flag = 0;
+		//} else
+		//if (global.mode & MODE_MWORKER_WAIT) {
+
+		// HAPROXY_MWORKER_REEXEC implicit MWORKER mode
+		atexit_flag = 1;
+		atexit(exit_on_waitmode_failure);
+		// ha_alert("Non-recoverable mworker wait-mode error, exiting.\n");
+		//}
 	}
 
 	if (change_dir && chdir(change_dir) < 0) {
@@ -2342,6 +2348,8 @@ static void init(int argc, char **argv)
 			case 0:
 				/* in child */
 				global.mode &= ~(MODE_MWORKER|MODE_MWORKER_WAIT);
+				/* child must never use the atexit function */
+				atexit_flag = 0;
 				startup_logs_free(startup_logs);
 				startup_logs = tmp_startup_logs;
 				/* This one must not be exported, it's internal! */
@@ -3999,10 +4007,6 @@ int main(int argc, char **argv)
 		exit(0); /* parent must leave */
 	}
 
-	// TODO: check when its executed, 
-	/* child must never use the atexit function */
-	//atexit_flag = 0;
-
 	/* close useless master sockets */
 	if (global.mode & MODE_MWORKER) {
 		struct mworker_proc *child, *it;
@@ -4037,11 +4041,7 @@ int main(int argc, char **argv)
 	/* pass through every cli socket, and check if it's bound to
 	 * the current process and if it exposes listeners sockets.
 	 * Caution: the GTUNE_SOCKET_TRANSFER is now set after the fork.
-	 * */
-	
-	// TODO: check when its executed
-	/* child must never use the atexit function */
-	//atexit_flag = 0;
+	 */
 	 
 	/* close the pidfile both in children and father */
 	//if (pidfd >= 0) {
