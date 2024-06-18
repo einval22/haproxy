@@ -2311,7 +2311,7 @@ static void init(int argc, char **argv)
 				protocol_unbind_all();
 				exit(1); /* there has been an error */
 			} else if (ret > 0) { /* parent leave to daemonize */
-				ha_notice("%s:%d:%s: Mode daemon successfully fork a child\n", __FILE__, __LINE__, __func__);
+				ha_notice("%s:%d:%s: Mode daemon successfully fork a child, exiting\n", __FILE__, __LINE__, __func__);
 				exit(0);
 			} else {/* change the process group ID in the child (master process) */
 				setsid();
