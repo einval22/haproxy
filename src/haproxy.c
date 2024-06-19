@@ -2983,36 +2983,41 @@ static void init(int argc, char **argv)
 	chunk_reset(&trash);
 
 	/* toolchain */
-	cc = chunk_newstr(&trash);
+	if (!(global.mode & MODE_WORKER)) {
+		cc = chunk_newstr(&trash);
 #if defined(__clang_version__)
-	chunk_appendf(&trash, "clang-" __clang_version__);
+		chunk_appendf(&trash, "clang-" __clang_version__);
 #elif defined(__VERSION__)
-	chunk_appendf(&trash, "gcc-" __VERSION__);
+		chunk_appendf(&trash, "gcc-" __VERSION__);
 #endif
 #if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
-	chunk_appendf(&trash, "+asan");
+		chunk_appendf(&trash, "+asan");
 #endif
 	/* toolchain opts */
-	cflags = chunk_newstr(&trash);
+		cflags = chunk_newstr(&trash);
 #ifdef BUILD_CC
-	chunk_appendf(&trash, "%s", BUILD_CC);
+		chunk_appendf(&trash, "%s", BUILD_CC);
 #endif
 #ifdef BUILD_CFLAGS
-	chunk_appendf(&trash, " %s", BUILD_CFLAGS);
+		chunk_appendf(&trash, " %s", BUILD_CFLAGS);
 #endif
 #ifdef BUILD_DEBUG
-	chunk_appendf(&trash, " %s", BUILD_DEBUG);
+		chunk_appendf(&trash, " %s", BUILD_DEBUG);
 #endif
 	/* settings */
-	opts = chunk_newstr(&trash);
+		opts = chunk_newstr(&trash);
 #ifdef BUILD_TARGET
-	chunk_appendf(&trash, "TARGET='%s'", BUILD_TARGET);
+		chunk_appendf(&trash, "TARGET='%s'", BUILD_TARGET);
 #endif
 #ifdef BUILD_OPTIONS
-	chunk_appendf(&trash, " %s", BUILD_OPTIONS);
+		chunk_appendf(&trash, " %s", BUILD_OPTIONS);
 #endif
 
-	post_mortem_add_component("haproxy", haproxy_version, cc, cflags, opts, argv[0]);
+		// check here show dev output, in mw mode do only for worker
+		post_mortem_add_component("haproxy", haproxy_version, cc, cflags, opts, argv[0]);
+		
+	}
+
 	ha_notice("%s:%d:%s: finished\n", __FILE__, __LINE__, __func__);
 }
 
