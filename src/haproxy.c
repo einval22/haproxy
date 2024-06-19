@@ -3927,93 +3927,8 @@ int main(int argc, char **argv)
 	clock_adjust_now_offset();
 	ready_date = date;
 
-	/* close the pidfile both in children and father */
-	//if (pidfd >= 0) {
-		//lseek(pidfd, 0, SEEK_SET);  /* debug: emulate eglibc bug */
-	//	close(pidfd);
-	//	ha_notice("%s:%d:%s:  closed pid FD=%d\n", __FILE__, __LINE__, __func__, pidfd);
-	//}
-	/* We won't ever use this anymore */
-	//ha_free(&global.pidfile);
-
-	
-		
-		//int ret = 0;
-		/*
-		 * if daemon + mworker: must fork here to let a master
-		 * process live in background before forking children
-		 */
-		// daemon's fork
-		//if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL)
-		//    && (global.mode & MODE_MWORKER)
-		//    && (global.mode & MODE_DAEMON)) {
-		//	ret = fork();
-		//	if (ret < 0) {
-		//		ha_alert("[%s.main()] Cannot fork.\n", argv[0]);
-		//		protocol_unbind_all();
-		//		exit(1); /* there has been an error */
-		//	} else if (ret > 0) { /* parent leave to daemonize */
-		//		ha_notice("%s:%d:%s: Mode daemon successfully fork a child\n", __FILE__, __LINE__, __func__);
-		//		exit(0);
-		//	} else {/* change the process group ID in the child (master process) */
-		//		setsid();
-		//		ha_notice("%s:%d:%s:  change the process group ID in the child (master process)\n", __FILE__, __LINE__, __func__);
-		//	}
-		//}
-
-
-		/* if in master-worker mode, write the PID of the father
-		if (global.mode & MODE_MWORKER) {
-			char pidstr[100];
-			snprintf(pidstr, sizeof(pidstr), "%d\n", (int)getpid());
-			if (pidfd >= 0) {
-				DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
-				ha_notice("%s:%d:%s:  written pidstr %s to pid FD=%d\n", __FILE__, __LINE__, __func__, pidstr, pidfd);
-			}
-		}
-		*/
-
-		/* the father launches the required number of processes */
-		/*
-		//if (!(global.mode & MODE_MWORKER_WAIT)) {
-		//	struct ring *tmp_startup_logs = NULL;
-
-		//	if (global.mode & MODE_MWORKER)
-		//		mworker_ext_launch_all();
-
-			
-			// tmp_startup_logs = startup_logs_dup(startup_logs);
-			//ret = fork();
-			//if (ret < 0) {
-			//	ha_alert("[%s.main()] Cannot fork.\n", argv[0]);
-			//	protocol_unbind_all();
-				//exit(1);  there has been an error
-			//}
-			//else if (ret == 0) { child breaks here */
-			//	startup_logs_free(startup_logs);
-			//	startup_logs = tmp_startup_logs;
-			// This one must not be exported, it's internal!
-			//	unsetenv("HAPROXY_MWORKER_REEXEC");
-			//	ha_random_jump96(1);
-			//}
-			// else { /* parent here 
-				
-			//	if (pidfd >= 0 && !(global.mode & MODE_MWORKER)) {
-			//		char pidstr[100];
-			//		snprintf(pidstr, sizeof(pidstr), "%d\n", ret);
-			//		DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
-			//	}
-				
-			//}
-
-		//} else {
-		//	wait mode 
-		//	in_parent = 1;
-		//}
-
-	if (in_parent) {
-		if (global.mode & (MODE_MWORKER|MODE_MWORKER_WAIT)) {
-			master = 1;
+	//if (in_parent) {
+	if (global.mode & MODE_MWORKER_WAIT) {
 			setenv("HAPROXY_LOAD_SUCCESS", "1", 1);
 			proc_self->failedreloads = 0; /* reset the number of failure, proc_self  points to master here */ // ?
 			ha_notice("Loading success.\n");
@@ -4028,29 +3943,20 @@ int main(int argc, char **argv)
 				global.mode |= MODE_QUIET; /* ensure that we won't say anything from now */
 			}
 
-			// MODE_MWORKER_WAIT means after fork()
-			if (global.mode & MODE_MWORKER_WAIT) {
-				/* only the wait mode handles the master CLI */
-				
-				mworker_loop();
-			} else {
-
 #if defined(USE_SYSTEMD)
-				if (global.tune.options & GTUNE_USE_SYSTEMD)
-					sd_notifyf(0, "READY=1\nMAINPID=%lu\nSTATUS=Ready.\n", (unsigned long)getpid());
+			if (global.tune.options & GTUNE_USE_SYSTEMD)
+				sd_notifyf(0, "READY=1\nMAINPID=%lu\nSTATUS=Ready.\n", (unsigned long)getpid());
 #endif
-				/* if not in wait mode, reload in wait mode to free the memory */
+			/* master starts its loop */
+			global.mode &= ~MODE_STARTING;
+			mworker_loop();
 
-//					mworker_reexec_waitmode();
-			}
-			/* should never get there */
-			exit(EXIT_FAILURE);
-		}
 #if defined(USE_OPENSSL) && !defined(OPENSSL_NO_DH)
-		ssl_free_dh();
+			ssl_free_dh();
 #endif
-		exit(0); /* parent must leave */
+			exit(0); /* parent must leave */
 	}
+	//}
 
 	/* close useless master sockets */
 	if (global.mode & MODE_MWORKER) {
