@@ -2445,12 +2445,7 @@ static void init(int argc, char **argv)
 				global.nbthread = 1;
 
 				// MASTER CLI
-				create_master_cli();
-
-				
-
-
-				
+				create_master_cli();	
 		}
 	}
 
