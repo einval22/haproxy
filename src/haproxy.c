@@ -927,24 +927,24 @@ void reexec_on_failure()
 	if (!atexit_flag)
 		return;
 
-	/* get the info of the children in the env
+	get the info of the children in the env
 	if (mworker_env_to_proc_list() < 0) {
 		exit(EXIT_FAILURE);
 	}
 
-	/* increment the number of failed reloads
+	increment the number of failed reloads
 	list_for_each_entry(child, &proc_list, list) {
 		child->failedreloads++;
 	}
 
-	/* do not keep unused FDs retrieved from the previous process
+	do not keep unused FDs retrieved from the previous process
 	sock_drop_unused_old_sockets();
 
 	usermsgs_clr(NULL);
 	setenv("HAPROXY_LOAD_SUCCESS", "0", 1);
 	ha_warning("Loading failure!\n");
 #if defined(USE_SYSTEMD)
-	/* the sd_notify API is not able to send a reload failure signal. So
+	the sd_notify API is not able to send a reload failure signal. So
 	 * the READY=1 signal still need to be sent
 	if (global.tune.options & GTUNE_USE_SYSTEMD)
 		sd_notify(0, "READY=1\nSTATUS=Reload failed!\n");
