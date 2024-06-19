@@ -2437,14 +2437,6 @@ static void init(int argc, char **argv)
 							break;
 					}
 				}
-				/* if in master-worker mode, write the PID of the child */
-				if (pidfd >= 0) {
-					char pidstr[100];
-					snprintf(pidstr, sizeof(pidstr), "%d\n", worker_pid);
-					ha_notice("%s:%d:%s: child's PID=%d written\n", __FILE__, __LINE__, __func__, worker_pid);
-					DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
-				}
-
 				/* in exec mode, there's always exactly one thread. Failure to
 				 * set these ones now will result in nbthread being detected
 				 * automatically.
