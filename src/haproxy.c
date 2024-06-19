@@ -2268,23 +2268,6 @@ static void init(int argc, char **argv)
 		do_check_condition(progname);
 	}
 
-	/* set the atexit functions when not doing configuration check */
-	// so this is MWORKER mode => show alert on exit
-	//if (!(global.mode & MODE_CHECK) && (global.mode & MODE_MWORKER)) {
-	//if (!(global.mode & (MODE_CHECK | MODE_CHECK_CONDITION)) && (getenv("HAPROXY_MWORKER_REEXEC") != NULL)) {
-
-		//if (global.mode & MODE_MWORKER) {
-		//	atexit_flag = 0;
-		//} else
-		//if (global.mode & MODE_MWORKER_WAIT) {
-
-		// HAPROXY_MWORKER_REEXEC implicit MWORKER mode
-		//atexit_flag = 1;
-		//atexit(exit_on_waitmode_failure);
-		// ha_alert("Non-recoverable mworker wait-mode error, exiting.\n");
-		//}
-	//}
-
 	if (change_dir && chdir(change_dir) < 0) {
 		ha_alert("Could not change to directory %s : %s\n", change_dir, strerror(errno));
 		exit(1);
