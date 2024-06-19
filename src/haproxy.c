@@ -2476,7 +2476,7 @@ static void init(int argc, char **argv)
 		}
 	}
 
-	if (global.mode & MODE_MWORKER_WAIT) {
+	//if (global.mode & MODE_MWORKER_WAIT) {
 		/* in exec mode, there's always exactly one thread. Failure to
 		 * set these ones now will result in nbthread being detected
 		 * automatically.
