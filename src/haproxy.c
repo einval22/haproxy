@@ -2350,37 +2350,41 @@ static void init(int argc, char **argv)
 
 	/* In mworkerV3 mode, the configuration is never parsed by the master,
 	 * but is parsed by the worker, the master only configure the master CLI */
-	 
-	 
-	
 
 	//if (global.mode & (MODE_DAEMON | MODE_MWORKER | MODE_MWORKER_WAIT)) {
-	if (global.mode & MODE_DAEMON) {
-		int ret = 0;
+	//if (global.mode & MODE_DAEMON) {
+		//int ret = 0;
 		/*
 		 * if daemon + mworker: must fork here to let a master
 		 * process live in background before forking children
 		 */
 		// daemon's fork
-		if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL) && (global.mode & MODE_DAEMON)) {
-		//if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL)
-		//    && (global.mode & MODE_MWORKER)
-		//    && (global.mode & MODE_DAEMON)) {
-			ret = fork();
-			if (ret < 0) {
-				ha_alert("[%s.main()] Cannot fork.\n", argv[0]);
+		// HAPROXY_MWORKER_REEXEC => master existed before and already daemon for sure
+	if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL) && (global.mode & MODE_DAEMON)) {
+	//if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL)
+	//    && (global.mode & MODE_MWORKER)
+	//    && (global.mode & MODE_DAEMON)) {
+		//ret = fork();
+		switch (fork()) {
+			case -1:
+				ha_alert("[%s.main()] Cannot fork: %s.\n", argv[0], strerror(errno));
 				protocol_unbind_all();
 				exit(1); /* there has been an error */
-			} else if (ret > 0) { /* parent leave to daemonize */
-				ha_notice("%s:%d:%s: Mode daemon successfully fork a child, exiting\n", __FILE__, __LINE__, __func__);
-				exit(0);
-			} else {/* change the process group ID in the child (master process) */
+			case 0:
+				/* in child: change the process group ID (may be master process) */
 				setsid();
 				ha_notice("%s:%d:%s:  change the process group ID in the child (master process)\n", __FILE__, __LINE__, __func__);
-			}
+
+				break;
+			default:
+				/* in parent: leave to daemonize */
+				ha_notice("%s:%d:%s: Mode daemon successfully fork a child, exiting\n", __FILE__, __LINE__, __func__);
+				exit(0);	
 		}
 	}
+	//}
 
+	// check in case of HAPROXY_MWORKER_REEXEC = 1
 	/* if in master-worker mode, write the PID of the father */
 	/* open log & pid files before the chroot */
 	if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) && global.pidfile != NULL) {
