@@ -3699,6 +3699,8 @@ int main(int argc, char **argv)
 	 * _getsocks on the stat socket, it must never been done in wait mode
 	 * and check mode
 	 */
+	// why MODE_CHECK_CONDITION, as we already exit in init in this mode ?
+	// MODE_CHECK ?? on est déjà sortié ?
 	if (old_unixsocket &&
 	    !(global.mode & (MODE_MWORKER_WAIT|MODE_CHECK|MODE_CHECK_CONDITION))) {
 		if (strcmp("/dev/null", old_unixsocket) != 0) {
@@ -3710,6 +3712,7 @@ int main(int argc, char **argv)
 		}
 	}
 
+	// DO ONLY FOR WORKER OR DAEMON ??
 	/* We will loop at most 100 times with 10 ms delay each time.
 	 * That's at most 1 second. We only send a signal to old pids
 	 * if we cannot grab at least one port.
