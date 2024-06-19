@@ -1625,6 +1625,121 @@ static int check_if_maxsock_permitted(int maxsock)
 	return ret == 0;
 }
 
+
+static void do_check_condition(char *progname) {
+	int result;
+	uint32_t err;
+	const char *errptr;
+	char *errmsg = NULL;
+
+	char *args[MAX_LINE_ARGS+1];
+	int arg = sizeof(args) / sizeof(*args);
+	size_t outlen;
+	char *w;
+
+	if (!check_condition)
+		usage(progname);
+
+	outlen = strlen(check_condition) + 1;
+	err = parse_line(check_condition, check_condition, &outlen, args, &arg,
+					 PARSE_OPT_ENV | PARSE_OPT_WORD_EXPAND | PARSE_OPT_DQUOTE | PARSE_OPT_SQUOTE | PARSE_OPT_BKSLASH,
+					 &errptr);
+
+	if (err & PARSE_ERR_QUOTE) {
+		ha_alert("Syntax Error in condition: Unmatched quote.\n");
+		exit(2);
+	}
+
+	if (err & PARSE_ERR_HEX) {
+		ha_alert("Syntax Error in condition: Truncated or invalid hexadecimal sequence.\n");
+		exit(2);
+	}
+
+	if (err & (PARSE_ERR_TOOLARGE|PARSE_ERR_OVERLAP)) {
+		ha_alert("Error in condition: Line too long.\n");
+		exit(2);
+	}
+
+	if (err & PARSE_ERR_TOOMANY) {
+		ha_alert("Error in condition: Too many words.\n");
+		exit(2);
+	}
+
+	if (err) {
+		ha_alert("Unhandled error in condition, please report this to the developers.\n");
+		exit(2);
+	}
+
+	/* remerge all words into a single expression */
+	for (w = *args; (w += strlen(w)) < check_condition + outlen - 1; *w = ' ')
+		;
+
+	result = cfg_eval_condition(args, &errmsg, &errptr);
+
+	if (result < 0) {
+		if (errmsg)
+			ha_alert("Failed to evaluate condition: %s\n", errmsg);
+
+		exit(2);
+	}
+
+	exit(result ? 0 : 1);
+}
+
+static void create_master_cli(void) {
+	struct wordlist *it, *c;
+
+	/* get the info of the children in the env */
+	if (mworker_env_to_proc_list() < 0) {
+		exit(EXIT_FAILURE);
+	}
+
+	if (!LIST_ISEMPTY(&mworker_cli_conf)) {
+		char *path = NULL;
+
+		if (mworker_cli_proxy_create() < 0) {
+			ha_alert("Can't create the master's CLI.\n");
+			exit(EXIT_FAILURE);
+		}
+
+		list_for_each_entry_safe(c, it, &mworker_cli_conf, list) {
+
+			if (mworker_cli_proxy_new_listener(c->s) == NULL) {
+				ha_alert("Can't create the master's CLI.\n");
+				exit(EXIT_FAILURE);
+			}
+			LIST_DELETE(&c->list);
+			free(c->s);
+			free(c);
+		}
+		/* Creates the mcli_reload listener, which is the listener used
+		 * to retrieve the master CLI session which asked for the reload.
+		 *
+		 * ipc_fd[1] will be used as a listener, and ipc_fd[0]
+		 * will be used to send the FD of the session.
+		 *
+		 * Both FDs will be kept in the master. The sockets are
+		 * created only if they weren't inherited.
+		 */
+		if ((proc_self->ipc_fd[1] == -1) &&
+			 socketpair(AF_UNIX, SOCK_STREAM, 0, proc_self->ipc_fd) < 0) {
+			ha_alert("cannot create the mcli_reload socketpair.\n");
+			exit(EXIT_FAILURE);
+		}
+
+		/* Create the mcli_reload listener from the proc_self struct */
+		memprintf(&path, "sockpair@%d", proc_self->ipc_fd[1]);
+		mcli_reload_bind_conf = mworker_cli_proxy_new_listener(path);
+		if (mcli_reload_bind_conf == NULL) {
+			ha_alert("Cannot create the mcli_reload listener.\n");
+			exit(EXIT_FAILURE);
+		}
+		ha_free(&path);
+	}
+	ha_notice("%s:%d:%s >> created master CLI FD\n", __FILE__, __LINE__, __func__);
+}
+
+
 /* This performs th every basic early initialization at the end of the PREPARE
  * init stage. It may only assume that list heads are initialized, but not that
  * anything else is correct. It will initialize a number of variables that
@@ -2153,9 +2268,14 @@ static void init(int argc, char **argv)
 	
 	ha_notice("%s:%d:%s: >>> MODE=0x%08x\n", __FILE__, __LINE__, __func__, global.mode);
 
+	/* 1. Do check_condition if we started with -cc and exit */
+	if (global.mode & MODE_CHECK_CONDITION) {
+		do_check_condition(progname);
+	}
+
 	/* set the atexit functions when not doing configuration check */
 	// so this is MWORKER mode => show alert on exit
-	if (!(global.mode & (MODE_CHECK | MODE_CHECK_CONDITION)) && (global.mode & MODE_MWORKER)) {
+	//if (!(global.mode & MODE_CHECK) && (global.mode & MODE_MWORKER)) {
 	//if (!(global.mode & (MODE_CHECK | MODE_CHECK_CONDITION)) && (getenv("HAPROXY_MWORKER_REEXEC") != NULL)) {
 
 		//if (global.mode & MODE_MWORKER) {
@@ -2164,11 +2284,11 @@ static void init(int argc, char **argv)
 		//if (global.mode & MODE_MWORKER_WAIT) {
 
 		// HAPROXY_MWORKER_REEXEC implicit MWORKER mode
-		atexit_flag = 1;
-		atexit(exit_on_waitmode_failure);
+		//atexit_flag = 1;
+		//atexit(exit_on_waitmode_failure);
 		// ha_alert("Non-recoverable mworker wait-mode error, exiting.\n");
 		//}
-	}
+	//}
 
 	if (change_dir && chdir(change_dir) < 0) {
 		ha_alert("Could not change to directory %s : %s\n", change_dir, strerror(errno));
@@ -2176,67 +2296,6 @@ static void init(int argc, char **argv)
 	}
 
 	usermsgs_clr("config");
-
-	if (global.mode & MODE_CHECK_CONDITION) {
-		int result;
-
-		uint32_t err;
-		const char *errptr;
-		char *errmsg = NULL;
-
-		char *args[MAX_LINE_ARGS+1];
-		int arg = sizeof(args) / sizeof(*args);
-		size_t outlen;
-		char *w;
-
-		if (!check_condition)
-			usage(progname);
-
-		outlen = strlen(check_condition) + 1;
-		err = parse_line(check_condition, check_condition, &outlen, args, &arg,
-		                 PARSE_OPT_ENV | PARSE_OPT_WORD_EXPAND | PARSE_OPT_DQUOTE | PARSE_OPT_SQUOTE | PARSE_OPT_BKSLASH,
-		                 &errptr);
-
-		if (err & PARSE_ERR_QUOTE) {
-			ha_alert("Syntax Error in condition: Unmatched quote.\n");
-			exit(2);
-		}
-
-		if (err & PARSE_ERR_HEX) {
-			ha_alert("Syntax Error in condition: Truncated or invalid hexadecimal sequence.\n");
-			exit(2);
-		}
-
-		if (err & (PARSE_ERR_TOOLARGE|PARSE_ERR_OVERLAP)) {
-			ha_alert("Error in condition: Line too long.\n");
-			exit(2);
-		}
-
-		if (err & PARSE_ERR_TOOMANY) {
-			ha_alert("Error in condition: Too many words.\n");
-			exit(2);
-		}
-
-		if (err) {
-			ha_alert("Unhandled error in condition, please report this to the developers.\n");
-			exit(2);
-		}
-
-		/* remerge all words into a single expression */
-		for (w = *args; (w += strlen(w)) < check_condition + outlen - 1; *w = ' ')
-			;
-
-		result = cfg_eval_condition(args, &errmsg, &errptr);
-
-		if (result < 0) {
-			if (errmsg)
-				ha_alert("Failed to evaluate condition: %s\n", errmsg);
-
-			exit(2);
-		}
-
-		exit(result ? 0 : 1);
-	}
 
 	// DAEMON or master parses its conf
 	/* in wait mode, we don't try to read the configuration files */
@@ -2373,7 +2432,10 @@ static void init(int argc, char **argv)
 			default:
 				/* in parent */
 				global.mode |= MODE_MWORKER_WAIT;
+				atexit_flag = 1;
+				atexit(exit_on_waitmode_failure);
 				in_parent = 1; // ?
+				master = 1;
 
 				ha_notice("New worker (%d) forked\n", worker_pid);
 				/* find the right mworker_proc */
@@ -2396,8 +2458,17 @@ static void init(int argc, char **argv)
 					snprintf(pidstr, sizeof(pidstr), "%d\n", worker_pid);
 					ha_notice("%s:%d:%s: child's PID=%d written\n", __FILE__, __LINE__, __func__, worker_pid);
 					DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
-				}	
-				
+				}
+
+				/* in exec mode, there's always exactly one thread. Failure to
+				 * set these ones now will result in nbthread being detected
+				 * automatically.
+				 */
+				global.nbtgroups = 1;
+				global.nbthread = 1;
+
+				// MASTER CLI
+				create_master_cli();
 		}
 	}
 
@@ -2406,65 +2477,11 @@ static void init(int argc, char **argv)
 		 * set these ones now will result in nbthread being detected
 		 * automatically.
 		 */
-		global.nbtgroups = 1;
-		global.nbthread = 1;
-	}
+	//	global.nbtgroups = 1;
+	//	global.nbthread = 1;
+	//}
 
-	// MASTER CLI
-	if (global.mode & (MODE_MWORKER|MODE_MWORKER_WAIT)) {
-		
-		struct wordlist *it, *c;
-
-		master = 1;
-		/* get the info of the children in the env */
-		if (mworker_env_to_proc_list() < 0) {
-			exit(EXIT_FAILURE);
-		}
-
-		if (!LIST_ISEMPTY(&mworker_cli_conf)) {
-			char *path = NULL;
-
-			if (mworker_cli_proxy_create() < 0) {
-				ha_alert("Can't create the master's CLI.\n");
-				exit(EXIT_FAILURE);
-			}
-
-			list_for_each_entry_safe(c, it, &mworker_cli_conf, list) {
-
-				if (mworker_cli_proxy_new_listener(c->s) == NULL) {
-					ha_alert("Can't create the master's CLI.\n");
-					exit(EXIT_FAILURE);
-				}
-				LIST_DELETE(&c->list);
-				free(c->s);
-				free(c);
-			}
-			/* Creates the mcli_reload listener, which is the listener used
-			 * to retrieve the master CLI session which asked for the reload.
-			 *
-			 * ipc_fd[1] will be used as a listener, and ipc_fd[0]
-			 * will be used to send the FD of the session.
-			 *
-			 * Both FDs will be kept in the master. The sockets are
-			 * created only if they weren't inherited.
-			 */
-			if ((proc_self->ipc_fd[1] == -1) &&
-			     socketpair(AF_UNIX, SOCK_STREAM, 0, proc_self->ipc_fd) < 0) {
-				ha_alert("cannot create the mcli_reload socketpair.\n");
-				exit(EXIT_FAILURE);
-			}
-
-			/* Create the mcli_reload listener from the proc_self struct */
-			memprintf(&path, "sockpair@%d", proc_self->ipc_fd[1]);
-			mcli_reload_bind_conf = mworker_cli_proxy_new_listener(path);
-			if (mcli_reload_bind_conf == NULL) {
-				ha_alert("Cannot create the mcli_reload listener.\n");
-				exit(EXIT_FAILURE);
-			}
-			ha_free(&path);
-		}
-		ha_notice("%s:%d:%s >> created master CLI FD\n", __FILE__, __LINE__, __func__);
-	}
+	// 
 
 	if (!LIST_ISEMPTY(&mworker_cli_conf) && !(arg_mode & MODE_MWORKER)) {
 		ha_alert("a master CLI socket was defined, but master-worker mode (-W) is not enabled.\n");
