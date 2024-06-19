@@ -2487,11 +2487,13 @@ static void init(int argc, char **argv)
 
 	// 
 
-	if (!LIST_ISEMPTY(&mworker_cli_conf) && !(arg_mode & MODE_MWORKER)) {
+	// move to end of init_args  ??
+	if ((!LIST_ISEMPTY(&mworker_cli_conf)) && (!(global.mode & MODE_MWORKER))) {
 		ha_alert("a master CLI socket was defined, but master-worker mode (-W) is not enabled.\n");
 		exit(EXIT_FAILURE);
 	}
 
+	// TODO: Some code may be excluded for master
 	/* destroy unreferenced defaults proxies  */
 	proxy_destroy_all_unref_defaults();
 
