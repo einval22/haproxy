@@ -882,6 +882,8 @@ static void mworker_loop()
 	/* Busy polling makes no sense in the master :-) */
 	global.tune.options &= ~GTUNE_BUSY_POLLING;
 
+	ha_notice("%s:%d: >>> Start mworker_loop\n", __FILE__, __LINE__);
+
 
 	signal_unregister(SIGTTIN);
 	signal_unregister(SIGTTOU);
