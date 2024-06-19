@@ -34,8 +34,8 @@
 #define	MODE_VERBOSE	0x10
 #define	MODE_STARTING	0x20
 #define	MODE_FOREGROUND	0x40
-#define	MODE_MWORKER	0x80    /* Master Worker */
-#define	MODE_MWORKER_WAIT	0x100    /* Master Worker wait mode */
+#define	MODE_MWORKER	0x80    /* Master Worker */ // MASTER
+#define	MODE_MWORKER_WAIT	0x100    /* Master Worker wait mode */ // MASTER_
 #define	MODE_ZERO_WARNING       0x200    /* warnings cause a failure */
 #define	MODE_DIAG	0x400   /* extra warnings */
 #define	MODE_CHECK_CONDITION	0x800    /* -cc mode */

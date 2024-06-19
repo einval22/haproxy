@@ -911,6 +911,8 @@ static void mworker_loop()
 		leave */
 
 	fork_poller();
+
+	//sem put
 	run_thread_poll_loop(NULL);
 }
 
@@ -2431,6 +2433,9 @@ static void init(int argc, char **argv)
 				ha_random_jump96(1);
 				read_cfg(progname);
 				ha_notice("%s:%d:%s: Child parsed config !\n", __FILE__, __LINE__, __func__);
+				// sem get
+
+
 
 				break;
 			default:
@@ -2440,7 +2445,7 @@ static void init(int argc, char **argv)
 				atexit(exit_on_waitmode_failure);
 				in_parent = 1; // ?
 				master = 1;
-
+				// metre à null sigchild
 				ha_notice("New worker (%d) forked\n", worker_pid);
 				/* find the right mworker_proc */
 				/* TODO: look to simplify as we already have tmproc on the stack, peut-etre on n'aura pas besoin de parcourir la liste */
@@ -2473,6 +2478,11 @@ static void init(int argc, char **argv)
 
 				// MASTER CLI
 				create_master_cli();
+
+				
+
+
+				
 		}
 	}
 
@@ -2487,7 +2497,7 @@ static void init(int argc, char **argv)
 
 	// 
 
-	// move to end of init_args  ??
+	// move to end of init_args  ?? // master
 	if ((!LIST_ISEMPTY(&mworker_cli_conf)) && (!(global.mode & MODE_MWORKER))) {
 		ha_alert("a master CLI socket was defined, but master-worker mode (-W) is not enabled.\n");
 		exit(EXIT_FAILURE);
@@ -3623,7 +3633,7 @@ int main(int argc, char **argv)
 
 	/* this is the late init where the config is parsed */
 	init(argc, argv);
-
+	// if !master
 	signal_register_fct(SIGQUIT, dump, SIGQUIT);
 	signal_register_fct(SIGUSR1, sig_soft_stop, SIGUSR1);
 	signal_register_fct(SIGHUP, sig_dump_state, SIGHUP);
@@ -3701,8 +3711,7 @@ int main(int argc, char **argv)
 	 */
 	// why MODE_CHECK_CONDITION, as we already exit in init in this mode ?
 	// MODE_CHECK ?? on est déjà sortié ?
-	if (old_unixsocket &&
-	    !(global.mode & (MODE_MWORKER_WAIT|MODE_CHECK|MODE_CHECK_CONDITION))) {
+	if (old_unixsocket && !(global.mode & (MODE_MWORKER_WAIT))) {
 		if (strcmp("/dev/null", old_unixsocket) != 0) {
 			if (sock_get_old_sockets(old_unixsocket) != 0) {
 				ha_alert("Failed to get the sockets from the old process!\n");
@@ -3816,7 +3825,7 @@ int main(int argc, char **argv)
 	
 	int devnullfd = -1;
 	if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) {
-			devnullfd = open("/dev/null", O_RDWR, 0);
+			devnullfd = open("/dev/null", (O_RDWR|O_CLOEXEC), 0);
 			if (devnullfd < 0) {
 				ha_alert("Cannot open /dev/null\n");
 				exit(EXIT_FAILURE);
@@ -3943,10 +3952,6 @@ int main(int argc, char **argv)
 				global.mode |= MODE_QUIET; /* ensure that we won't say anything from now */
 			}
 
-#if defined(USE_SYSTEMD)
-			if (global.tune.options & GTUNE_USE_SYSTEMD)
-				sd_notifyf(0, "READY=1\nMAINPID=%lu\nSTATUS=Ready.\n", (unsigned long)getpid());
-#endif
 			/* master starts its loop */
 			global.mode &= ~MODE_STARTING;
 			mworker_loop();
@@ -4140,6 +4145,11 @@ int main(int argc, char **argv)
 
 	ha_notice("Configuration loaded.\n");
 	/* Finally, start the poll loop for the first thread */
+
+#if defined(USE_SYSTEMD)
+	if (global.tune.options & GTUNE_USE_SYSTEMD)
+		sd_notifyf(0, "READY=1\nMAINPID=%lu\nSTATUS=Ready.\n", (unsigned long)getpid());
+#endif
 	run_thread_poll_loop(&ha_thread_info[0]);
 
 	/* wait for all threads to terminate */
