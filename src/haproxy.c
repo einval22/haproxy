@@ -3959,24 +3959,26 @@ int main(int argc, char **argv)
 	//}
 
 	/* close useless master sockets */
+	// TODO: check where it is needed ??
+	/*
 	if (global.mode & MODE_MWORKER) {
 		struct mworker_proc *child, *it;
 		master = 0;
 
 		mworker_cli_proxy_stop();
 
-		/* free proc struct of other processes  */
+		free proc struct of other processes
 		list_for_each_entry_safe(child, it, &proc_list, list) {
-			/* close the FD of the master side for all
+			close the FD of the master side for all
 			 * workers, we don't need to close the worker
 			 * side of other workers since it's done with
-			 * the bind_proc */
+			 * the bind_proc
 			if (child->ipc_fd[0] >= 0) {
 				close(child->ipc_fd[0]);
 				child->ipc_fd[0] = -1;
 			}
 			if (child->options & PROC_O_TYPE_WORKER && child->reloads == 0 && child->pid == -1) {
-				/* keep this struct if this is our pid */
+				keep this struct if this is our pid
 				proc_self = child;
 				continue;
 			}
@@ -3985,6 +3987,7 @@ int main(int argc, char **argv)
 			child = NULL;
 		}
 	}
+	*/
 
 	//} /*  if (global.mode & (MODE_DAEMON | MODE_MWORKER | MODE_MWORKER_WAIT)) */
 
