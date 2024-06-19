@@ -2449,17 +2449,6 @@ static void init(int argc, char **argv)
 		}
 	}
 
-	//if (global.mode & MODE_MWORKER_WAIT) {
-		/* in exec mode, there's always exactly one thread. Failure to
-		 * set these ones now will result in nbthread being detected
-		 * automatically.
-		 */
-	//	global.nbtgroups = 1;
-	//	global.nbthread = 1;
-	//}
-
-	// 
-
 	// move to end of init_args  ?? // master
 	if ((!LIST_ISEMPTY(&mworker_cli_conf)) && (!(global.mode & MODE_MWORKER))) {
 		ha_alert("a master CLI socket was defined, but master-worker mode (-W) is not enabled.\n");
