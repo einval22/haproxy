@@ -45,6 +45,7 @@
 #define	MODE_DUMP_CFG   0x8000  /* dump the configuration file */
 #define	MODE_DUMP_NB_L  0x10000 /* dump line numbers when the configuration file is dump */
 #define	MODE_WORKER     0x20000
+#define MODE_MASTER_CLI 0x40000
 
 /* list of last checks to perform, depending on config options */
 #define LSTCHK_SYSADM	0x00000001	/* check that we have CAP_SYS_ADMIN */

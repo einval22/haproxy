@@ -2028,6 +2028,7 @@ static void init_args(int argc, char **argv)
 					exit(EXIT_FAILURE);
 				}
 				LIST_INSERT(&mworker_cli_conf, &c->list);
+				arg_mode |= MODE_MASTER_CLI;
 
 				argv++;
 				argc--;
@@ -2123,6 +2124,12 @@ static void init_args(int argc, char **argv)
 			usage(progname);
 		argv++; argc--;
 	}
+
+	if ((arg_mode & MODE_MASTER_CLI) && !(arg_mode & MODE_MWORKER)) {
+		ha_alert("Master socket option -S expected master-worker mode enabled via -W\n");
+		usage(progname);
+	}
+
 	free(err_msg);
 }
 
@@ -2449,11 +2456,10 @@ static void init(int argc, char **argv)
 		}
 	}
 
-	// move to end of init_args  ?? // master
-	if (!LIST_ISEMPTY(&mworker_cli_conf) && !(global.mode & MODE_MWORKER)) {
-		ha_alert("a master CLI socket was defined, but master-worker mode (-W) is not enabled.\n");
-		exit(EXIT_FAILURE);
-	}
+	//if (!(global.mode & )!LIST_ISEMPTY(&mworker_cli_conf) && !(global.mode & MODE_MWORKER)) {
+	//	ha_alert("a master CLI socket was defined, but master-worker mode (-W) is not enabled.\n");
+	//	exit(EXIT_FAILURE);
+	//}
 
 	// TODO: Some code may be excluded for master
 	/* destroy unreferenced defaults proxies  */
