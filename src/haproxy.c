@@ -2373,8 +2373,8 @@ static void init(int argc, char **argv)
 	/* if in master-worker mode, write the PID of the father */
 	/* open log & pid files before the chroot */
 	if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) && global.pidfile != NULL) {
-	//if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) &&
-	//    !(global.mode & MODE_MWORKER_WAIT) && global.pidfile != NULL) {
+		char pidstr[100];
+
 		unlink(global.pidfile);
 		pidfd = open(global.pidfile, O_CREAT | O_WRONLY | O_TRUNC, 0644);
 		if (pidfd < 0) {
@@ -2384,7 +2384,6 @@ static void init(int argc, char **argv)
 			protocol_unbind_all();
 			exit(1);
 		}
-		char pidstr[100];
 		snprintf(pidstr, sizeof(pidstr), "%d\n", (int)getpid());
 		DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
 		ha_notice("%s:%d:%s:  written pidstr %s to pid FD=%d\n", __FILE__, __LINE__, __func__, pidstr, pidfd);
