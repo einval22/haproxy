@@ -3510,6 +3510,7 @@ int main(int argc, char **argv)
 {
 	int err, retry;
 	struct rlimit limit;
+	int devnullfd = -1;
 	
 	int intovf = (unsigned char)argc + 1; /* let the compiler know it's strictly positive */
 
@@ -3779,8 +3780,7 @@ int main(int argc, char **argv)
 	}
 	/* We won't ever use this anymore */
 	ha_free(&global.pidfile);
-	
-	int devnullfd = -1;
+
 	if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) {
 			devnullfd = open("/dev/null", (O_RDWR|O_CLOEXEC), 0);
 			if (devnullfd < 0) {
