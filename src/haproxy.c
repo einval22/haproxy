@@ -2251,15 +2251,22 @@ static void init(int argc, char **argv)
 	  */
 	if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL) &&
             (global.mode & MODE_DAEMON)) {
-		ret = fork();
-		if (ret < 0) {
-			ha_alert("[%s.main()] Cannot fork.\n", argv[0]);
-			protocol_unbind_all();
-			exit(1); /* there has been an error */
-		} else if (ret > 0) { /* parent leave to daemonize */
-			exit(0);
-		} else /* change the process group ID in the child (master process) */
-			setsid();
+		switch(fork()) {
+			case -1:
+				ha_alert("[%s.main()] Cannot fork.\n", argv[0]);
+				protocol_unbind_all();
+				exit(1); /* there has been an error */
+			case 0:
+				/* in child, change the process group ID, in the master-worker
+				 * mode, this will be the master process
+				 */
+				setsid();
+
+				break;
+			default:
+				/* in parent, which leaves to daemonize */
+				exit(0);
+		}
 	}
 
 	/* open pid file, if in master-worker mode, write PID of the father */
