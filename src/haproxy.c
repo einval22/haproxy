@@ -224,6 +224,7 @@ int unstoppable_jobs = 0;  /* number of active jobs that can't be stopped during
 int active_peers = 0; /* number of active peers (connection attempts and connected) */
 int connected_peers = 0; /* number of connected peers (verified ones) */
 int arg_mode = 0;	/* MODE_DEBUG etc as passed on command line ... */
+int pidfd = -1;    /* process PID FD */
 char *change_dir = NULL; /* set when -C is passed */
 char *check_condition = NULL; /* check condition passed to -cc */
 
@@ -2152,6 +2153,7 @@ static void init(int argc, char **argv)
 {
 	char *progname = global.log_tag.area;
 	int err_code = 0;
+	int ret = 0;
 	struct proxy *px;
 	struct post_check_fct *pcf;
 	struct pre_check_fct *prcf;
@@ -2194,27 +2196,11 @@ static void init(int argc, char **argv)
 				    | MODE_DIAG | MODE_CHECK_CONDITION | MODE_DUMP_LIBS | MODE_DUMP_KWD
 				    | MODE_DUMP_CFG | MODE_DUMP_NB_L));
 
-	if (getenv("HAPROXY_MWORKER_WAIT_ONLY")) {
-		unsetenv("HAPROXY_MWORKER_WAIT_ONLY");
-		global.mode |= MODE_MWORKER_WAIT;
-		global.mode &= ~MODE_MWORKER;
-	}
-
 	/* Do check_condition, if we started with -cc, and exit. */
 	if (global.mode & MODE_CHECK_CONDITION)
 		do_check_condition(progname);
 
-	/* set the atexit functions when not doing configuration check */
-	if (!(global.mode & MODE_CHECK) && (getenv("HAPROXY_MWORKER_REEXEC") != NULL)) {
 
-		if (global.mode & MODE_MWORKER) {
-			atexit_flag = 1;
-			atexit(reexec_on_failure);
-		} else if (global.mode & MODE_MWORKER_WAIT) {
-			atexit_flag = 1;
-			atexit(exit_on_waitmode_failure);
-		}
-	}
 
 	if (change_dir && chdir(change_dir) < 0) {
 		ha_alert("Could not change to directory %s : %s\n", change_dir, strerror(errno));
@@ -2223,8 +2209,7 @@ static void init(int argc, char **argv)
 
 	usermsgs_clr("config");
 
-	/* in wait mode, we don't try to read the configuration files */
-	if (!(global.mode & MODE_MWORKER_WAIT))
+	if (!(global.mode & MODE_MWORKER))
 		read_cfg(progname);
 
 	if (global.mode & MODE_MWORKER) {
@@ -2261,7 +2246,7 @@ static void init(int argc, char **argv)
 		LIST_APPEND(&proc_list, &tmproc->list);
 	}
 
-	if (global.mode & MODE_MWORKER_WAIT) {
+	if (global.mode & MODE_MWORKER) {
 		/* in exec mode, there's always exactly one thread. Failure to
 		 * set these ones now will result in nbthread being detected
 		 * automatically.
@@ -2270,7 +2255,90 @@ static void init(int argc, char **argv)
 		global.nbthread = 1;
 	}
 
-	if (global.mode & (MODE_MWORKER|MODE_MWORKER_WAIT))
+	 /* if daemon + mworker: must fork here to let a master process live in
+	  * background before forking children.
+	  */
+	if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL) &&
+            (global.mode & MODE_DAEMON)) {
+		ret = fork();
+		if (ret < 0) {
+			ha_alert("[%s.main()] Cannot fork.\n", argv[0]);
+			protocol_unbind_all();
+			exit(1); /* there has been an error */
+		} else if (ret > 0) { /* parent leave to daemonize */
+			exit(0);
+		} else /* change the process group ID in the child (master process) */
+			setsid();
+	}
+
+	/* open pid file, if in master-worker mode, write PID of the father */
+	if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) && global.pidfile != NULL) {
+		char pidstr[100];
+
+		unlink(global.pidfile);
+		pidfd = open(global.pidfile, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+		if (pidfd < 0) {
+			ha_alert("[%s.main()] Cannot create pidfile %s\n", argv[0], global.pidfile);
+			if (nb_oldpids)
+				tell_old_pids(SIGTTIN);
+			protocol_unbind_all();
+			exit(1);
+		}
+		snprintf(pidstr, sizeof(pidstr), "%d\n", (int)getpid());
+		DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
+	}
+
+	/* master-worker mode fork() */
+	if (global.mode & MODE_MWORKER) {
+		int worker_pid;
+		struct mworker_proc *child;
+		struct ring *tmp_startup_logs = NULL;
+		/* at this point the worker must have his own startup_logs buffer */
+		tmp_startup_logs = startup_logs_dup(startup_logs);
+		worker_pid = fork();
+		switch (worker_pid) {
+			case -1:
+				ha_alert("[%s.main()] Cannot fork.\n", argv[0]);
+
+				exit(EXIT_FAILURE);
+			case 0:
+				/* in child */
+				global.mode &= ~(MODE_MWORKER|MODE_MWORKER_WAIT);
+				/* child must never use the atexit function */
+				atexit_flag = 0;
+				startup_logs_free(startup_logs);
+				startup_logs = tmp_startup_logs;
+				/* This one must not be exported, it's internal! */
+				unsetenv("HAPROXY_MWORKER_REEXEC");
+				ha_random_jump96(1);
+				read_cfg(progname);
+
+				break;
+			default:
+				/* in parent */
+				global.mode |= MODE_MWORKER_WAIT;
+				master = 1;
+				atexit_flag = 1;
+				atexit(exit_on_waitmode_failure);
+
+				ha_notice("New worker (%d) forked\n", worker_pid);
+				/* find the right mworker_proc */
+				list_for_each_entry(child, &proc_list, list) {
+					if (child->reloads == 0 && child->options & PROC_O_TYPE_WORKER && child->pid == -1) {
+							child->timestamp = date.tv_sec;
+							child->pid = worker_pid;
+							child->version = strdup(haproxy_version);
+							/* at this step the fd is bound for the worker, set it to -1 so
+							 * it could be close in case of errors in mworker_cleanup_proc() */
+							child->ipc_fd[1] = -1;
+
+							break;
+					}
+				}
+		}
+	}
+
+	if (global.mode & MODE_MWORKER_WAIT)
 		mworker_create_master_cli();
 
 	if (!LIST_ISEMPTY(&mworker_cli_conf) && !(arg_mode & MODE_MWORKER)) {
@@ -3320,7 +3388,7 @@ int main(int argc, char **argv)
 {
 	int err, retry;
 	struct rlimit limit;
-	int pidfd = -1;
+	int devnullfd = -1;
 	int intovf = (unsigned char)argc + 1; /* let the compiler know it's strictly positive */
 
 	/* Catch broken toolchains */
@@ -3557,20 +3625,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/* open log & pid files before the chroot */
-	if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) &&
-	    !(global.mode & MODE_MWORKER_WAIT) && global.pidfile != NULL) {
-		unlink(global.pidfile);
-		pidfd = open(global.pidfile, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-		if (pidfd < 0) {
-			ha_alert("[%s.main()] Cannot create pidfile %s\n", argv[0], global.pidfile);
-			if (nb_oldpids)
-				tell_old_pids(SIGTTIN);
-			protocol_unbind_all();
-			exit(1);
-		}
-	}
-
 	if ((global.mode & (MODE_MWORKER|MODE_DAEMON)) == 0) {
 
 		/* chroot if needed */
@@ -3589,7 +3643,7 @@ int main(int argc, char **argv)
 		nb_oldpids = tell_old_pids(oldpids_sig);
 
 	/* send a SIGTERM to workers who have a too high reloads number  */
-	if ((global.mode & MODE_MWORKER) && !(global.mode & MODE_MWORKER_WAIT))
+	if ((global.mode & MODE_MWORKER) && (global.mode & MODE_MWORKER_WAIT))
 		mworker_kill_max_reloads(SIGTERM);
 
 	/* Note that any error at this stage will be fatal because we will not
@@ -3658,223 +3712,111 @@ int main(int argc, char **argv)
 	clock_adjust_now_offset();
 	ready_date = date;
 
-	if (global.mode & (MODE_DAEMON | MODE_MWORKER | MODE_MWORKER_WAIT)) {
-		int ret = 0;
-		int in_parent = 0;
-		int devnullfd = -1;
+	/* close the pidfile both in children and father */
+	if (pidfd >= 0) {
+		//lseek(pidfd, 0, SEEK_SET);  /* debug: emulate eglibc bug */
+		close(pidfd);
+	}
+	/* We won't ever use this anymore */
+	ha_free(&global.pidfile);
 
-		/*
-		 * if daemon + mworker: must fork here to let a master
-		 * process live in background before forking children
-		 */
+	if (global.mode & MODE_MWORKER_WAIT) {
+		struct mworker_proc *child, *it;
 
-		if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL)
-		    && (global.mode & MODE_MWORKER)
-		    && (global.mode & MODE_DAEMON)) {
-			ret = fork();
-			if (ret < 0) {
-				ha_alert("[%s.main()] Cannot fork.\n", argv[0]);
-				protocol_unbind_all();
-				exit(1); /* there has been an error */
-			} else if (ret > 0) { /* parent leave to daemonize */
-				exit(0);
-			} else /* change the process group ID in the child (master process) */
-				setsid();
-		}
+		setenv("HAPROXY_LOAD_SUCCESS", "1", 1);
+		proc_self->failedreloads = 0; /* reset the number of failure, proc_self  points to master here */
+		ha_notice("Loading success.\n");
+		if ((!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) &&
+			(global.mode & MODE_DAEMON)) {
+			/* detach from the tty, this is required to properly daemonize. */
+			if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL))
+				stdio_quiet(-1);
 
-
-		/* if in master-worker mode, write the PID of the father */
-		if (global.mode & MODE_MWORKER) {
-			char pidstr[100];
-			snprintf(pidstr, sizeof(pidstr), "%d\n", (int)getpid());
-			if (pidfd >= 0)
-				DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
-		}
-
-		/* the father launches the required number of processes */
-		if (!(global.mode & MODE_MWORKER_WAIT)) {
-			struct ring *tmp_startup_logs = NULL;
-
-			if (global.mode & MODE_MWORKER)
-				mworker_ext_launch_all();
-
-			/* at this point the worker must have his own startup_logs buffer */
-			tmp_startup_logs = startup_logs_dup(startup_logs);
-			ret = fork();
-			if (ret < 0) {
-				ha_alert("[%s.main()] Cannot fork.\n", argv[0]);
-				protocol_unbind_all();
-				exit(1); /* there has been an error */
-			}
-			else if (ret == 0) { /* child breaks here */
-				startup_logs_free(startup_logs);
-				startup_logs = tmp_startup_logs;
-				/* This one must not be exported, it's internal! */
-				unsetenv("HAPROXY_MWORKER_REEXEC");
-				ha_random_jump96(1);
-			}
-			else { /* parent here */
-				in_parent = 1;
-
-				if (pidfd >= 0 && !(global.mode & MODE_MWORKER)) {
-					char pidstr[100];
-					snprintf(pidstr, sizeof(pidstr), "%d\n", ret);
-					DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
-				}
-				if (global.mode & MODE_MWORKER) {
-					struct mworker_proc *child;
-
-					ha_notice("New worker (%d) forked\n", ret);
-					/* find the right mworker_proc */
-					list_for_each_entry(child, &proc_list, list) {
-						if (child->reloads == 0 &&
-						    child->options & PROC_O_TYPE_WORKER &&
-						    child->pid == -1) {
-							child->timestamp = date.tv_sec;
-							child->pid = ret;
-							child->version = strdup(haproxy_version);
-							/* at this step the fd is bound for the worker, set it to -1 so
-							 * it could be close in case of errors in mworker_cleanup_proc() */
-							child->ipc_fd[1] = -1;
-							break;
-						}
-					}
-				}
-			}
-
-		} else {
-			/* wait mode */
-			in_parent = 1;
-		}
-
-		/* close the pidfile both in children and father */
-		if (pidfd >= 0) {
-			//lseek(pidfd, 0, SEEK_SET);  /* debug: emulate eglibc bug */
-			close(pidfd);
-		}
-
-		/* We won't ever use this anymore */
-		ha_free(&global.pidfile);
-
-		if (in_parent) {
-			if (global.mode & (MODE_MWORKER|MODE_MWORKER_WAIT)) {
-				master = 1;
-
-				if ((!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) &&
-					(global.mode & MODE_DAEMON)) {
-					/* detach from the tty, this is required to properly daemonize. */
-					if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL))
-						stdio_quiet(-1);
-
-					global.mode &= ~MODE_VERBOSE;
-					global.mode |= MODE_QUIET; /* ensure that we won't say anything from now */
-				}
-
-				if (global.mode & MODE_MWORKER_WAIT) {
-					/* only the wait mode handles the master CLI */
-					mworker_loop();
-				} else {
-
-#if defined(USE_SYSTEMD)
-					if (global.tune.options & GTUNE_USE_SYSTEMD)
-						sd_notifyf(0, "READY=1\nMAINPID=%lu\nSTATUS=Ready.\n", (unsigned long)getpid());
-#endif
-					/* if not in wait mode, reload in wait mode to free the memory */
-					setenv("HAPROXY_LOAD_SUCCESS", "1", 1);
-					ha_notice("Loading success.\n");
-					proc_self->failedreloads = 0; /* reset the number of failure */
-					mworker_reexec_waitmode();
-				}
-				/* should never get there */
-				exit(EXIT_FAILURE);
-			}
-#if defined(USE_OPENSSL) && !defined(OPENSSL_NO_DH)
-			ssl_free_dh();
-#endif
-			exit(0); /* parent must leave */
-		}
-
-		/* child must never use the atexit function */
-		atexit_flag = 0;
-
-		/* close useless master sockets */
-		if (global.mode & MODE_MWORKER) {
-			struct mworker_proc *child, *it;
-			master = 0;
-
-			mworker_cli_proxy_stop();
-
-			/* free proc struct of other processes  */
-			list_for_each_entry_safe(child, it, &proc_list, list) {
-				/* close the FD of the master side for all
-				 * workers, we don't need to close the worker
-				 * side of other workers since it's done with
-				 * the bind_proc */
-				if (child->ipc_fd[0] >= 0) {
-					close(child->ipc_fd[0]);
-					child->ipc_fd[0] = -1;
-				}
-				if (child->options & PROC_O_TYPE_WORKER &&
-				    child->reloads == 0 &&
-				    child->pid == -1) {
-					/* keep this struct if this is our pid */
-					proc_self = child;
-					continue;
-				}
-				LIST_DELETE(&child->list);
-				mworker_free_child(child);
-				child = NULL;
-			}
-		}
-
-		if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) {
-			devnullfd = open("/dev/null", O_RDWR, 0);
-			if (devnullfd < 0) {
-				ha_alert("Cannot open /dev/null\n");
-				exit(EXIT_FAILURE);
-			}
-		}
-
-		/* Must chroot and setgid/setuid in the children */
-		/* chroot if needed */
-		if (global.chroot != NULL) {
-			if (chroot(global.chroot) == -1 || chdir("/") == -1) {
-				ha_alert("[%s.main()] Cannot chroot(%s).\n", argv[0], global.chroot);
-				if (nb_oldpids)
-					tell_old_pids(SIGTTIN);
-				protocol_unbind_all();
-				exit(1);
-			}
-		}
-
-		ha_free(&global.chroot);
-		set_identity(argv[0]);
-
-		/*
-		 * This is only done in daemon mode because we might want the
-		 * logs on stdout in mworker mode. If we're NOT in QUIET mode,
-		 * we should now close the 3 first FDs to ensure that we can
-		 * detach from the TTY. We MUST NOT do it in other cases since
-		 * it would have already be done, and 0-2 would have been
-		 * affected to listening sockets
-		 */
-		if ((global.mode & MODE_DAEMON) &&
-		    (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))) {
-			/* detach from the tty */
-			stdio_quiet(devnullfd);
 			global.mode &= ~MODE_VERBOSE;
 			global.mode |= MODE_QUIET; /* ensure that we won't say anything from now */
 		}
-		pid = getpid(); /* update child's pid */
-		if (!(global.mode & MODE_MWORKER)) /* in mworker mode we don't want a new pgid for the children */
-			setsid();
-		fork_poller();
+		/* only the wait mode handles the master CLI */
+		mworker_loop();
+
+#if defined(USE_OPENSSL) && !defined(OPENSSL_NO_DH)
+		ssl_free_dh();
+#endif
+		/* close useless master sockets */
+		master = 0;
+		mworker_cli_proxy_stop();
+
+		/* free proc struct of other processes  */
+		list_for_each_entry_safe(child, it, &proc_list, list) {
+			/* close the FD of the master side for all
+			 * workers, we don't need to close the worker
+			 * side of other workers since it's done with
+			 * the bind_proc */
+			if (child->ipc_fd[0] >= 0) {
+				close(child->ipc_fd[0]);
+				child->ipc_fd[0] = -1;
+			}
+			if (child->options & PROC_O_TYPE_WORKER &&
+				child->reloads == 0 &&
+				child->pid == -1) {
+				/* keep this struct if this is our pid */
+				proc_self = child;
+				continue;
+			}
+			LIST_DELETE(&child->list);
+			mworker_free_child(child);
+			child = NULL;
+		}
+		exit(0); /* parent must leave */
 	}
+
+	if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) {
+	        devnullfd = open("/dev/null", (O_RDWR|O_CLOEXEC), 0);
+		if (devnullfd < 0) {
+		        ha_alert("Cannot open /dev/null\n");
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	/* chroot if needed */
+	if (global.chroot != NULL) {
+		if (chroot(global.chroot) == -1 || chdir("/") == -1) {
+			ha_alert("[%s.main()] Cannot chroot(%s).\n", argv[0], global.chroot);
+			if (nb_oldpids)
+				tell_old_pids(SIGTTIN);
+			protocol_unbind_all();
+			exit(1);
+		}
+	}
+
+	ha_free(&global.chroot);
+	set_identity(argv[0]);
+
+
+	/*
+	 * This is only done in daemon mode because we might want the
+	 * logs on stdout in mworker mode. If we're NOT in QUIET mode,
+	 * we should now close the 3 first FDs to ensure that we can
+	 * detach from the TTY. We MUST NOT do it in other cases since
+	 * it would have already be done, and 0-2 would have been
+	 * affected to listening sockets
+	 */
+
+	if ((global.mode & MODE_DAEMON) &&
+		(!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE))) {
+		/* detach from the tty */
+		stdio_quiet(devnullfd);
+		global.mode &= ~MODE_VERBOSE;
+		global.mode |= MODE_QUIET; /* ensure that we won't say anything from now */
+	}
+	pid = getpid(); /* update child's pid */
+	if (!(global.mode & MODE_MWORKER)) /* in mworker mode we don't want a new pgid for the children */
+		setsid();
+	fork_poller();
 
 	/* pass through every cli socket, and check if it's bound to
 	 * the current process and if it exposes listeners sockets.
 	 * Caution: the GTUNE_SOCKET_TRANSFER is now set after the fork.
-	 * */
+	 */
 
 	if (global.cli_fe) {
 		struct bind_conf *bind_conf;
@@ -3958,6 +3900,10 @@ int main(int argc, char **argv)
 	/* when multithreading we need to let only the thread 0 handle the signals */
 	haproxy_unblock_signals();
 
+#if defined(USE_SYSTEMD)
+	if (global.tune.options & GTUNE_USE_SYSTEMD)
+		sd_notifyf(0, "READY=1\nMAINPID=%lu\nSTATUS=Ready.\n", (unsigned long)getpid());
+#endif
 	/* Finally, start the poll loop for the first thread */
 	run_thread_poll_loop(&ha_thread_info[0]);
 
