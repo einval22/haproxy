@@ -153,6 +153,7 @@ char *build_features = "";
 /* list of config files */
 static struct list cfg_cfgfiles = LIST_HEAD_INIT(cfg_cfgfiles);
 int  pid;			/* current process id */
+int  pidfd = -1;		/* FD to keep PID */
 
 static unsigned long stopping_tgroup_mask; /* Thread groups acknowledging stopping */
 
@@ -2157,6 +2158,7 @@ static void init(int argc, char **argv)
 	struct pre_check_fct *prcf;
 	int ideal_maxconn;
 	const char *cc, *cflags, *opts;
+	char pidstr[100];
 
 #ifdef USE_OPENSSL
 #ifdef USE_OPENSSL_WOLFSSL
@@ -2291,6 +2293,22 @@ static void init(int argc, char **argv)
 			/* in parent, which leaves to daemonize */
 			exit(0);
 		}
+	}
+
+	/* open log & pid files before the chroot */
+	if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) &&
+	    !(global.mode & MODE_MWORKER_WAIT) && global.pidfile != NULL) {
+		unlink(global.pidfile);
+		pidfd = open(global.pidfile, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+		if (pidfd < 0) {
+			ha_alert("[%s.main()] Cannot create pidfile %s\n", argv[0], global.pidfile);
+			if (nb_oldpids)
+				tell_old_pids(SIGTTIN);
+			protocol_unbind_all();
+			exit(1);
+		}
+		snprintf(pidstr, sizeof(pidstr), "%d\n", (int)getpid());
+		DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
 	}
 
 	if (global.mode & (MODE_MWORKER|MODE_MWORKER_WAIT))
@@ -3343,7 +3361,6 @@ int main(int argc, char **argv)
 {
 	int err, retry;
 	struct rlimit limit;
-	int pidfd = -1;
 	int intovf = (unsigned char)argc + 1; /* let the compiler know it's strictly positive */
 
 	/* Catch broken toolchains */
@@ -3580,19 +3597,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/* open log & pid files before the chroot */
-	if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) &&
-	    !(global.mode & MODE_MWORKER_WAIT) && global.pidfile != NULL) {
-		unlink(global.pidfile);
-		pidfd = open(global.pidfile, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-		if (pidfd < 0) {
-			ha_alert("[%s.main()] Cannot create pidfile %s\n", argv[0], global.pidfile);
-			if (nb_oldpids)
-				tell_old_pids(SIGTTIN);
-			protocol_unbind_all();
-			exit(1);
-		}
-	}
 
 	if ((global.mode & (MODE_MWORKER|MODE_DAEMON)) == 0) {
 
@@ -3685,14 +3689,6 @@ int main(int argc, char **argv)
 		int in_parent = 0;
 		int devnullfd = -1;
 
-		/* if in master-worker mode, write the PID of the father */
-		if (global.mode & MODE_MWORKER) {
-			char pidstr[100];
-			snprintf(pidstr, sizeof(pidstr), "%d\n", (int)getpid());
-			if (pidfd >= 0)
-				DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
-		}
-
 		/* the father launches the required number of processes */
 		if (!(global.mode & MODE_MWORKER_WAIT)) {
 			struct ring *tmp_startup_logs = NULL;
@@ -3718,11 +3714,6 @@ int main(int argc, char **argv)
 			else { /* parent here */
 				in_parent = 1;
 
-				if (pidfd >= 0 && !(global.mode & MODE_MWORKER)) {
-					char pidstr[100];
-					snprintf(pidstr, sizeof(pidstr), "%d\n", ret);
-					DISGUISE(write(pidfd, pidstr, strlen(pidstr)));
-				}
 				if (global.mode & MODE_MWORKER) {
 					struct mworker_proc *child;
 
