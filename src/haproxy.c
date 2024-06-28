@@ -2152,6 +2152,7 @@ static void init(int argc, char **argv)
 {
 	char *progname = global.log_tag.area;
 	int err_code = 0;
+	int ret = 0;
 	struct proxy *px;
 	struct post_check_fct *pcf;
 	struct pre_check_fct *prcf;
@@ -2268,6 +2269,22 @@ static void init(int argc, char **argv)
 		 */
 		global.nbtgroups = 1;
 		global.nbthread = 1;
+	}
+
+	/* if daemon + mworker: must fork here to let a master process live in
+	 * background before forking children.
+	 */
+	if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL) &&
+		(global.mode & MODE_DAEMON)) {
+		ret = fork();
+		if (ret < 0) {
+			ha_alert("[%s.main()] Cannot fork.\n", argv[0]);
+			protocol_unbind_all();
+			exit(1); /* there has been an error */
+		} else if (ret > 0) { /* parent leave to daemonize */
+			exit(0);
+		} else /* change the process group ID in the child (master process) */
+			setsid();
 	}
 
 	if (global.mode & (MODE_MWORKER|MODE_MWORKER_WAIT))
@@ -3659,29 +3676,8 @@ int main(int argc, char **argv)
 	ready_date = date;
 
 	if (global.mode & (MODE_DAEMON | MODE_MWORKER | MODE_MWORKER_WAIT)) {
-		int ret = 0;
 		int in_parent = 0;
 		int devnullfd = -1;
-
-		/*
-		 * if daemon + mworker: must fork here to let a master
-		 * process live in background before forking children
-		 */
-
-		if ((getenv("HAPROXY_MWORKER_REEXEC") == NULL)
-		    && (global.mode & MODE_MWORKER)
-		    && (global.mode & MODE_DAEMON)) {
-			ret = fork();
-			if (ret < 0) {
-				ha_alert("[%s.main()] Cannot fork.\n", argv[0]);
-				protocol_unbind_all();
-				exit(1); /* there has been an error */
-			} else if (ret > 0) { /* parent leave to daemonize */
-				exit(0);
-			} else /* change the process group ID in the child (master process) */
-				setsid();
-		}
-
 
 		/* if in master-worker mode, write the PID of the father */
 		if (global.mode & MODE_MWORKER) {
