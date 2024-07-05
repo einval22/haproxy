@@ -95,6 +95,7 @@
 #if defined(USE_LINUX_CAP)
 #include <haproxy/linuxcap.h>
 #endif
+#include <haproxy/limits.h>
 #include <haproxy/list.h>
 #include <haproxy/listener.h>
 #include <haproxy/log.h>
@@ -1439,199 +1440,6 @@ static void ha_random_boot(char *const *argv)
 	ha_random_seed(boot_seed, sizeof(boot_seed));
 }
 
-/* considers splicing proxies' maxconn, computes the ideal global.maxpipes
- * setting, and returns it. It may return -1 meaning "unlimited" if some
- * unlimited proxies have been found and the global.maxconn value is not yet
- * set. It may also return a value greater than maxconn if it's not yet set.
- * Note that a value of zero means there is no need for pipes. -1 is never
- * returned if global.maxconn is valid.
- */
-static int compute_ideal_maxpipes()
-{
-	struct proxy *cur;
-	int nbfe = 0, nbbe = 0;
-	int unlimited = 0;
-	int pipes;
-	int max;
-
-	for (cur = proxies_list; cur; cur = cur->next) {
-		if (cur->options2 & (PR_O2_SPLIC_ANY)) {
-			if (cur->cap & PR_CAP_FE) {
-				max = cur->maxconn;
-				nbfe += max;
-				if (!max) {
-					unlimited = 1;
-					break;
-				}
-			}
-			if (cur->cap & PR_CAP_BE) {
-				max = cur->fullconn ? cur->fullconn : global.maxconn;
-				nbbe += max;
-				if (!max) {
-					unlimited = 1;
-					break;
-				}
-			}
-		}
-	}
-
-	pipes = MAX(nbfe, nbbe);
-	if (global.maxconn) {
-		if (pipes > global.maxconn || unlimited)
-			pipes = global.maxconn;
-	} else if (unlimited) {
-		pipes = -1;
-	}
-
-	return pipes >= 4 ? pipes / 4 : pipes;
-}
-
-/* considers global.maxsocks, global.maxpipes, async engines, SSL frontends and
- * rlimits and computes an ideal maxconn. It's meant to be called only when
- * maxsock contains the sum of listening FDs, before it is updated based on
- * maxconn and pipes. If there are not enough FDs left, DEFAULT_MAXCONN (by
- * default 100) is returned as it is expected that it will even run on tight
- * environments, and will maintain compatibility with previous packages that
- * used to rely on this value as the default one. The system will emit a
- * warning indicating how many FDs are missing anyway if needed.
- */
-static int compute_ideal_maxconn(struct rlimit *fd_lim_at_boot)
-{
-	int ssl_sides = !!global.ssl_used_frontend + !!global.ssl_used_backend;
-	int engine_fds = global.ssl_used_async_engines * ssl_sides;
-	int pipes = compute_ideal_maxpipes();
-	int remain = MAX(fd_lim_at_boot->rlim_cur, fd_lim_at_boot->rlim_max);
-	int maxconn;
-
-	/* we have to take into account these elements :
-	 *   - number of engine_fds, which inflates the number of FD needed per
-	 *     connection by this number.
-	 *   - number of pipes per connection on average : for the unlimited
-	 *     case, this is 0.5 pipe FDs per connection, otherwise it's a
-	 *     fixed value of 2*pipes.
-	 *   - two FDs per connection
-	 */
-
-	/* on some modern distros for archs like amd64 fs.nr_open (kernel max) could
-	 * be in order of 1 billion, systemd since the version 256~rc3-3 bumped
-	 * fs.nr_open as the hard RLIMIT_NOFILE (rlim_fd_max_at_boot). If we are
-	 * started without any limits, we risk to finish with computed
-	 * maxconn = ~500000000, maxsock = ~2*maxconn. So, fdtab will be extremely
-	 * large and watchdog will kill the process, when it will try to loop over
-	 * the fdtab (see fd_reregister_all). Please note, that fd_hard_limit is
-	 * taken in account implicitly via 'ideal_maxconn' value in all
-	 * global.maxconn adjustements, when global.rlimit_memmax is set:
-	 *   MIN(global.maxconn, capped by global.rlimit_memmax, ideal_maxconn);
-	 * It also caps global.rlimit_nofile, if it could not be set as rlim_cur and
-	 * rlim_max. So, it is a good parameter to serve as a safeguard, when no
-     * haproxy-specific limits are set, i.e. rlimit_memmax, maxconn,
-	 * rlimit_nofile. But it must be kept as a zero, if only one of these
-     * ha-specific limits is presented either in config, or in the cmdline.
-	 */
-	if (!global.fd_hard_limit && !global.maxconn && !global.rlimit_nofile
-		&& !global.rlimit_memmax)
-		global.fd_hard_limit = DEFAULT_MAXFD;
-
-	if (remain > global.fd_hard_limit)
-		remain = global.fd_hard_limit;
-
-	/* subtract listeners and checks */
-	remain -= global.maxsock;
-
-	/* one epoll_fd/kqueue_fd per thread */
-	remain -= global.nbthread;
-
-	/* one wake-up pipe (2 fd) per thread */
-	remain -= 2 * global.nbthread;
-
-	/* Fixed pipes values : we only subtract them if they're not larger
-	 * than the remaining FDs because pipes are optional.
-	 */
-	if (pipes >= 0 && pipes * 2 < remain)
-		remain -= pipes * 2;
-
-	if (pipes < 0) {
-		/* maxsock = maxconn * 2 + maxconn/4 * 2 + maxconn * engine_fds.
-		 *         = maxconn * (2 + 0.5 + engine_fds)
-		 *         = maxconn * (4 + 1 + 2*engine_fds) / 2
-		 */
-		maxconn = 2 * remain / (5 + 2 * engine_fds);
-	} else {
-		/* maxsock = maxconn * 2 + maxconn * engine_fds.
-		 *         = maxconn * (2 + engine_fds)
-		 */
-		maxconn = remain / (2 + engine_fds);
-	}
-
-	return MAX(maxconn, DEFAULT_MAXCONN);
-}
-
-/* computes the estimated maxsock value for the given maxconn based on the
- * possibly set global.maxpipes and existing partial global.maxsock. It may
- * temporarily change global.maxconn for the time needed to propagate the
- * computations, and will reset it.
- */
-static int compute_ideal_maxsock(int maxconn)
-{
-	int maxpipes = global.maxpipes;
-	int maxsock  = global.maxsock;
-
-
-	if (!maxpipes) {
-		int old_maxconn = global.maxconn;
-
-		global.maxconn = maxconn;
-		maxpipes = compute_ideal_maxpipes();
-		global.maxconn = old_maxconn;
-	}
-
-	maxsock += maxconn * 2;         /* each connection needs two sockets */
-	maxsock += maxpipes * 2;        /* each pipe needs two FDs */
-	maxsock += global.nbthread;     /* one epoll_fd/kqueue_fd per thread */
-	maxsock += 2 * global.nbthread; /* one wake-up pipe (2 fd) per thread */
-
-	/* compute fd used by async engines */
-	if (global.ssl_used_async_engines) {
-		int sides = !!global.ssl_used_frontend + !!global.ssl_used_backend;
-
-		maxsock += maxconn * sides * global.ssl_used_async_engines;
-	}
-	return maxsock;
-}
-
-/* Tests if it is possible to set the current process's RLIMIT_NOFILE to
- * <maxsock>, then sets it back to the previous value. Returns non-zero if the
- * value is accepted, non-zero otherwise. This is used to determine if an
- * automatic limit may be applied or not. When it is not, the caller knows that
- * the highest we can do is the rlim_max at boot. In case of error, we return
- * that the setting is possible, so that we defer the error processing to the
- * final stage in charge of enforcing this.
- */
-static int check_if_maxsock_permitted(int maxsock)
-{
-	struct rlimit orig_limit, test_limit;
-	int ret;
-
-	if (global.fd_hard_limit && maxsock > global.fd_hard_limit)
-		return 0;
-
-	if (getrlimit(RLIMIT_NOFILE, &orig_limit) != 0)
-		return 1;
-
-	/* don't go further if we can't even set to what we have */
-	if (raise_rlim_nofile(NULL, &orig_limit) != 0)
-		return 1;
-
-	test_limit.rlim_max = MAX(maxsock, orig_limit.rlim_max);
-	test_limit.rlim_cur = test_limit.rlim_max;
-	ret = raise_rlim_nofile(NULL, &test_limit);
-
-	if (raise_rlim_nofile(NULL, &orig_limit) != 0)
-		return 1;
-
-	return ret == 0;
-}
-
 /* Evaluates a condition provided within a conditional block of the
  * configuration. Makes process to exit with 0, if the condition is true, with
  * 1, if the condition is false or with 2, if parse_line encounters an error.
@@ -2465,7 +2273,9 @@ static void init(int argc, char **argv, struct rlimit *fd_lim_at_boot)
 		global.maxconn = MASTER_MAXCONN;
 
 	if (cfg_maxconn > 0)
-		global.maxconn = cfg_maxconn;
+		global.maxconn = cfg_maxconn; // -n
+
+	ha_notice("%s >>>: global.maxconn=%d, cfg_maxconn given=%d\n", __func__, global.maxconn, cfg_maxconn);
 
 	if (global.cli_fe)
 		global.maxsock += global.cli_fe->maxconn;
@@ -2502,7 +2312,9 @@ static void init(int argc, char **argv, struct rlimit *fd_lim_at_boot)
 	 * SYSTEM_MAXCONN is set, we still enforce it as an upper limit for
 	 * maxconn in order to protect the system.
 	 */
-	ideal_maxconn = compute_ideal_maxconn(&fd_lim_at_boot);
+	ideal_maxconn = compute_ideal_maxconn(&fd_lim_at_boot, proxies_list);
+
+	ha_notice("%s >>>: ideal_maxconn computed=%d, global.maxconn given=%d\n", __func__, ideal_maxconn, global.maxconn );
 
 	if (!global.rlimit_memmax) {
 		if (global.maxconn == 0) {
@@ -2510,6 +2322,7 @@ static void init(int argc, char **argv, struct rlimit *fd_lim_at_boot)
 			if (global.mode & (MODE_VERBOSE|MODE_DEBUG))
 				fprintf(stderr, "Note: setting global.maxconn to %d.\n", global.maxconn);
 		}
+		ha_notice("%s >>>: global.maxconn=%d\n", __func__, global.maxconn);
 	}
 #ifdef USE_OPENSSL
 	else if (!global.maxconn && !global.maxsslconn &&
@@ -2542,8 +2355,8 @@ static void init(int argc, char **argv, struct rlimit *fd_lim_at_boot)
 				 sides * global.ssl_session_max_cost +            // SSL buffers, one per side
 				 global.ssl_handshake_max_cost);                  // 1 handshake per connection max
 
-			if (retried == 1)
-				global.maxconn = MIN(global.maxconn, ideal_maxconn);
+			if (retried == 1)    // 1000000
+				global.maxconn = MIN(global.maxconn, ideal_maxconn); // DEFAULT_FD_MAX
 			global.maxconn = round_2dig(global.maxconn);
 #ifdef SYSTEM_MAXCONN
 			if (global.maxconn > SYSTEM_MAXCONN)
@@ -2656,7 +2469,7 @@ static void init(int argc, char **argv, struct rlimit *fd_lim_at_boot)
 	global.maxsock = compute_ideal_maxsock(global.maxconn);
 	global.hardmaxconn = global.maxconn;
 	if (!global.maxpipes)
-		global.maxpipes = compute_ideal_maxpipes();
+		global.maxpipes = compute_ideal_maxpipes(proxies_list);
 
 	/* update connection pool thresholds */
 	global.tune.pool_low_count  = ((long long)global.maxsock * global.tune.pool_low_ratio  + 99) / 100;
@@ -3396,6 +3209,8 @@ int main(int argc, char **argv)
 	//rlim_fd_cur_at_boot = limit_at_boot.rlim_cur;
 	//rlim_fd_max_at_boot = limit_at_boot.rlim_max;
 
+	ha_notice(">>> %s: start: rlim_fd_cur_at_boot=%d, rlim_fd_max_at_boot=%d\n", __func__, rlim_fd_cur_at_boot, rlim_fd_max_at_boot);
+
 	/* process all initcalls in order of potential dependency */
 	RUN_INITCALLS(STG_PREPARE);
 	RUN_INITCALLS(STG_LOCK);
@@ -3436,15 +3251,15 @@ int main(int argc, char **argv)
 	signal_register_fct(SIGPIPE, NULL, 0);
 
 	/* ulimits */
-	if (!global.rlimit_nofile)
-		global.rlimit_nofile = global.maxsock;
+	if (!global.rlimit_nofile) // ulimit -n
+		global.rlimit_nofile = global.maxsock; // 2*maxconn
 
 	if (global.rlimit_nofile) {
 		limit.rlim_cur = global.rlimit_nofile;
 		limit.rlim_max = MAX(fd_limit_at_boot.rlim_max, global.rlimit_nofile);
 
-		if ((global.fd_hard_limit && limit.rlim_cur > global.fd_hard_limit) ||
-		    raise_rlim_nofile(NULL, &limit) != 0) {
+		if ((global.fd_hard_limit && limit.rlim_cur > global.fd_hard_limit)
+			|| raise_rlim_nofile(NULL, &limit) != 0) {
 			getrlimit(RLIMIT_NOFILE, &limit);
 			if (global.fd_hard_limit && limit.rlim_cur > global.fd_hard_limit)
 				limit.rlim_cur = global.fd_hard_limit;
