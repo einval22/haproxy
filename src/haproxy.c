@@ -254,8 +254,8 @@ static char **old_argv = NULL; /* previous argv but cleaned up */
 struct list proc_list = LIST_HEAD_INIT(proc_list);
 
 int master = 0; /* 1 if in master, 0 if in child */
-unsigned int rlim_fd_cur_at_boot = 0;
-unsigned int rlim_fd_max_at_boot = 0;
+//unsigned int rlim_fd_cur_at_boot = 0;
+//unsigned int rlim_fd_max_at_boot = 0;
 
 /* per-boot randomness */
 unsigned char boot_seed[20];        /* per-boot random seed (160 bits initially) */
@@ -711,7 +711,7 @@ int delete_oldpid(int pid)
  * When called, this function reexec haproxy with -sf followed by current
  * children PIDs and possibly old children PIDs if they didn't leave yet.
  */
-static void mworker_reexec(int hardreload)
+static void mworker_reexec(int hardreload, struct rlimit *fd_limit_at_boot)
 {
 	char **next_argv = NULL;
 	int old_argc = 0; /* previous number of argument */
@@ -747,11 +747,11 @@ static void mworker_reexec(int hardreload)
 #endif
 
 	/* restore the initial FD limits */
-	limit.rlim_cur = rlim_fd_cur_at_boot;
-	limit.rlim_max = rlim_fd_max_at_boot;
-	if (raise_rlim_nofile(&limit, &limit) != 0) {
+	//limit.rlim_cur = rlim_fd_cur_at_boot;
+	//limit.rlim_max = rlim_fd_max_at_boot;
+	if (raise_rlim_nofile(&limit, fd_limit_at_boot) != 0) {
 		ha_warning("Failed to restore initial FD limits (cur=%u max=%u), using cur=%u max=%u\n",
-			   rlim_fd_cur_at_boot, rlim_fd_max_at_boot,
+			   fd_limit_at_boot->rlim_cur, fd_limit_at_boot->rlim_max,
 			   (unsigned int)limit.rlim_cur, (unsigned int)limit.rlim_max);
 	}
 
@@ -1495,12 +1495,12 @@ static int compute_ideal_maxpipes()
  * used to rely on this value as the default one. The system will emit a
  * warning indicating how many FDs are missing anyway if needed.
  */
-static int compute_ideal_maxconn()
+static int compute_ideal_maxconn(struct rlimit *fd_lim_at_boot)
 {
 	int ssl_sides = !!global.ssl_used_frontend + !!global.ssl_used_backend;
 	int engine_fds = global.ssl_used_async_engines * ssl_sides;
 	int pipes = compute_ideal_maxpipes();
-	int remain = MAX(rlim_fd_cur_at_boot, rlim_fd_max_at_boot);
+	int remain = MAX(fd_lim_at_boot->rlim_cur, fd_lim_at_boot->rlim_max);
 	int maxconn;
 
 	/* we have to take into account these elements :
@@ -2168,7 +2168,7 @@ static void generate_random_cluster_secret()
  * This function initializes all the necessary variables. It only returns
  * if everything is OK. If something fails, it exits.
  */
-static void init(int argc, char **argv)
+static void init(int argc, char **argv, struct rlimit *fd_lim_at_boot)
 {
 	char *progname = global.log_tag.area;
 	int err_code = 0;
@@ -2502,7 +2502,7 @@ static void init(int argc, char **argv)
 	 * SYSTEM_MAXCONN is set, we still enforce it as an upper limit for
 	 * maxconn in order to protect the system.
 	 */
-	ideal_maxconn = compute_ideal_maxconn();
+	ideal_maxconn = compute_ideal_maxconn(&fd_lim_at_boot);
 
 	if (!global.rlimit_memmax) {
 		if (global.maxconn == 0) {
@@ -3339,7 +3339,7 @@ static void set_identity(const char *program_name)
 int main(int argc, char **argv)
 {
 	int err, retry;
-	struct rlimit limit;
+	struct rlimit fd_limit_at_boot, limit;
 	int pidfd = -1;
 	int intovf = (unsigned char)argc + 1; /* let the compiler know it's strictly positive */
 
@@ -3389,12 +3389,12 @@ int main(int argc, char **argv)
 	setvbuf(stdout, NULL, _IONBF, 0);
 
 	/* take a copy of initial limits before we possibly change them */
-	getrlimit(RLIMIT_NOFILE, &limit);
+	getrlimit(RLIMIT_NOFILE, &fd_limit_at_boot);
 
-	if (limit.rlim_max == RLIM_INFINITY)
-		limit.rlim_max = limit.rlim_cur;
-	rlim_fd_cur_at_boot = limit.rlim_cur;
-	rlim_fd_max_at_boot = limit.rlim_max;
+	if (fd_limit_at_boot.rlim_max == RLIM_INFINITY)
+		fd_limit_at_boot.rlim_max = fd_limit_at_boot.rlim_cur;
+	//rlim_fd_cur_at_boot = limit_at_boot.rlim_cur;
+	//rlim_fd_max_at_boot = limit_at_boot.rlim_max;
 
 	/* process all initcalls in order of potential dependency */
 	RUN_INITCALLS(STG_PREPARE);
@@ -3418,8 +3418,11 @@ int main(int argc, char **argv)
 
 	RUN_INITCALLS(STG_INIT);
 
-	/* this is the late init where the config is parsed */
-	init(argc, argv);
+	/* This is the late init where the config is parsed, maxconn and maxsock
+     * are calculated based on system fd hard limit and global.fd-hard-limit, if
+	 * thay were not provided via config file or cmd line.
+	 */
+	init(argc, argv, &fd_limit_at_boot);
 
 	signal_register_fct(SIGQUIT, dump, SIGQUIT);
 	signal_register_fct(SIGUSR1, sig_soft_stop, SIGUSR1);
@@ -3438,7 +3441,7 @@ int main(int argc, char **argv)
 
 	if (global.rlimit_nofile) {
 		limit.rlim_cur = global.rlimit_nofile;
-		limit.rlim_max = MAX(rlim_fd_max_at_boot, limit.rlim_cur);
+		limit.rlim_max = MAX(fd_limit_at_boot.rlim_max, global.rlimit_nofile);
 
 		if ((global.fd_hard_limit && limit.rlim_cur > global.fd_hard_limit) ||
 		    raise_rlim_nofile(NULL, &limit) != 0) {
