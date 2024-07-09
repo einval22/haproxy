@@ -936,7 +936,7 @@ void reexec_on_failure()
 /*
  * Exit with an error message upon a wait-mode failure.
  */
-void exit_on_waitmode_failure()
+void exit_on_failure()
 {
 	if (!atexit_flag)
 		return;
@@ -2175,7 +2175,7 @@ static void init(int argc, char **argv)
 			global.mode |= MODE_MWORKER_WAIT;
 			master = 1;
 			atexit_flag = 1;
-			atexit(exit_on_waitmode_failure);
+			atexit(exit_on_failure);
 
 			ha_notice("New worker (%d) forked\n", worker_pid);
 			/* find the right mworker_proc */
