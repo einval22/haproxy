@@ -776,34 +776,32 @@ static void mworker_reexec(int hardreload)
 
 	/* insert the new options just after argv[0] in case we have a -- */
 
-	if (getenv("HAPROXY_MWORKER_WAIT_ONLY") == NULL) {
-		/* add -sf <PID>*  to argv */
-		if (mworker_child_nb() > 0) {
-			struct mworker_proc *child;
+	/* add -sf <PID>*  to argv */
+	if (mworker_child_nb() > 0) {
+		struct mworker_proc *child;
 
-			if (hardreload)
-				next_argv[next_argc++] = "-st";
-			else
-				next_argv[next_argc++] = "-sf";
+		if (hardreload)
+			next_argv[next_argc++] = "-st";
+		else
+			next_argv[next_argc++] = "-sf";
 
-			list_for_each_entry(child, &proc_list, list) {
-				if (!(child->options & PROC_O_LEAVING) && (child->options & PROC_O_TYPE_WORKER))
-					current_child = child;
+		list_for_each_entry(child, &proc_list, list) {
+			if (!(child->options & PROC_O_LEAVING) && (child->options & PROC_O_TYPE_WORKER))
+				current_child = child;
 
-				if (!(child->options & (PROC_O_TYPE_WORKER|PROC_O_TYPE_PROG)) || child->pid <= -1)
-					continue;
-				if ((next_argv[next_argc++] = memprintf(&msg, "%d", child->pid)) == NULL)
-					goto alloc_error;
-				msg = NULL;
-			}
-		}
-		if (!x_off && current_child) {
-			/* add the -x option with the socketpair of the current worker */
-			next_argv[next_argc++] = "-x";
-			if ((next_argv[next_argc++] = memprintf(&msg, "sockpair@%d", current_child->ipc_fd[0])) == NULL)
+			if (!(child->options & (PROC_O_TYPE_WORKER|PROC_O_TYPE_PROG)) || child->pid <= -1)
+				continue;
+			if ((next_argv[next_argc++] = memprintf(&msg, "%d", child->pid)) == NULL)
 				goto alloc_error;
 			msg = NULL;
 		}
+	}
+	if (!x_off && current_child) {
+		/* add the -x option with the socketpair of the current worker */
+		next_argv[next_argc++] = "-x";
+		if ((next_argv[next_argc++] = memprintf(&msg, "sockpair@%d", current_child->ipc_fd[0])) == NULL)
+			goto alloc_error;
+		msg = NULL;
 	}
 
 	if (x_off) {
@@ -2029,12 +2027,6 @@ static void init(int argc, char **argv)
 				    | MODE_DIAG | MODE_CHECK_CONDITION | MODE_DUMP_LIBS | MODE_DUMP_KWD
 				    | MODE_DUMP_CFG | MODE_DUMP_NB_L));
 
-	if (getenv("HAPROXY_MWORKER_WAIT_ONLY")) {
-		unsetenv("HAPROXY_MWORKER_WAIT_ONLY");
-		global.mode |= MODE_MWORKER_WAIT;
-		global.mode &= ~MODE_MWORKER;
-	}
-
 	/* Do check_condition, if we started with -cc, and exit. */
 	if (global.mode & MODE_CHECK_CONDITION)
 		do_check_condition(progname);
@@ -2046,7 +2038,6 @@ static void init(int argc, char **argv)
 
 	usermsgs_clr("config");
 
-	/* in wait mode, we don't try to read the configuration files */
 	if (!(global.mode & MODE_MWORKER)) {
 		ret = read_cfg(progname);
 		/* free memory to store config file content */
@@ -2121,7 +2112,7 @@ static void init(int argc, char **argv)
 
 	/* open log & pid files before the chroot */
 	if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) &&
-	    !(global.mode & MODE_MWORKER_WAIT) && global.pidfile != NULL) {
+		global.pidfile != NULL) {
 		unlink(global.pidfile);
 		pidfd = open(global.pidfile, O_CREAT | O_WRONLY | O_TRUNC, 0644);
 		if (pidfd < 0) {
@@ -2151,7 +2142,7 @@ static void init(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		case 0:
 			/* in child */
-			global.mode &= ~(MODE_MWORKER|MODE_MWORKER_WAIT);
+			global.mode &= ~MODE_MWORKER;
 			/* child must never use the atexit function */
 			atexit_flag = 0;
 			startup_logs_free(startup_logs);
@@ -2165,7 +2156,6 @@ static void init(int argc, char **argv)
 			break;
 		default:
 			/* in parent */
-			global.mode |= MODE_MWORKER_WAIT;
 			master = 1;
 			atexit_flag = 1;
 			atexit(exit_on_failure);
@@ -2358,7 +2348,7 @@ static void init(int argc, char **argv)
 	}
 
 	/* set the default maxconn in the master, but let it be rewritable with -n */
-	if (global.mode & MODE_MWORKER_WAIT)
+	if (global.mode & MODE_MWORKER)
 		global.maxconn = MASTER_MAXCONN;
 
 	if (cfg_maxconn > 0)
@@ -3395,7 +3385,7 @@ int main(int argc, char **argv)
 	 * is started and run under the same non-root user, this allows
 	 * binding to privileged ports.
 	 */
-	if (!(global.mode & MODE_MWORKER))
+	if (!master)
 	    prepare_caps_from_permitted_set(geteuid(), global.uid, argv[0]);
 #endif
 
@@ -3404,7 +3394,7 @@ int main(int argc, char **argv)
 	 * and check mode
 	 */
 	if (old_unixsocket &&
-	    !(global.mode & (MODE_MWORKER_WAIT|MODE_CHECK|MODE_CHECK_CONDITION))) {
+	    !(global.mode & (MODE_MWORKER|MODE_CHECK|MODE_CHECK_CONDITION))) {
 		if (strcmp("/dev/null", old_unixsocket) != 0) {
 			if (sock_get_old_sockets(old_unixsocket) != 0) {
 				ha_alert("Failed to get the sockets from the old process!\n");
@@ -3454,7 +3444,7 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
-	if (!(global.mode & MODE_MWORKER_WAIT) && listeners == 0) {
+	if (!master && listeners == 0) {
 		ha_alert("[%s.main()] No enabled listener found (check for 'bind' directives) ! Exiting.\n", argv[0]);
 		/* Note: we don't have to send anything to the old pids because we
 		 * never stopped them. */
@@ -3486,11 +3476,14 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (nb_oldpids && !(global.mode & MODE_MWORKER_WAIT))
+	if (nb_oldpids && !master)
 		nb_oldpids = tell_old_pids(oldpids_sig);
 
-	/* send a SIGTERM to workers who have a too high reloads number  */
-	if ((global.mode & MODE_MWORKER) && !(global.mode & MODE_MWORKER_WAIT))
+	/* Send a SIGTERM to workers who have a too high reloads number.
+	 * master=1 means that fork() was done before. So, at this stage we already
+	 * have at least one new worker with reloads=0, which is bound to sockets.
+	 */
+	if (master)
 		mworker_kill_max_reloads(SIGTERM);
 
 	/* Note that any error at this stage will be fatal because we will not
@@ -3536,7 +3529,7 @@ int main(int argc, char **argv)
 	/* We won't ever use this anymore */
 	ha_free(&global.pidfile);
 
-	if (global.mode & MODE_MWORKER_WAIT) {
+	if (master) {
 		struct mworker_proc *child, *it;
 
 		if ((!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) &&
@@ -3650,7 +3643,7 @@ int main(int argc, char **argv)
 		global.mode |= MODE_QUIET; /* ensure that we won't say anything from now */
 	}
 	pid = getpid(); /* update child's pid */
-	if (!(global.mode & MODE_MWORKER)) /* in mworker mode we don't want a new pgid for the children */
+	if (!master) /* in mworker mode we don't want a new pgid for the children */
 		setsid();
 	fork_poller();
 
