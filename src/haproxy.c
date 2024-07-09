@@ -2212,7 +2212,10 @@ static void init(int argc, char **argv)
 
 	usermsgs_clr("config");
 
-	/* in wait mode, we don't try to read the configuration files */
+	/* for now read configuration files only in modes:
+	 *  - single process: foreground and daemon;
+	 *  - master-worker: only for worker process run at foreground and as a daemon.
+	 */
 	if (!(global.mode & MODE_MWORKER))
 		read_cfg(progname);
 
