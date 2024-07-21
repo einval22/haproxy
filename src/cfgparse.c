@@ -1764,13 +1764,35 @@ int readcfgfile(const struct cfgfile *file)
 		goto err;
 	}
 
+	ha_notice(">>> content=%s\n", cfg->content);
+	ha_notice(">>> size=%ld\n", cfg->size );
+	
 next_line:
+	ha_notice(">>> readbytes=%d\n", readbytes);
+	ha_notice(">>> thisline=%s, addr=%p\n", thisline, thisline);
+	ha_notice(">>> thisline + readbyes=%s, addr=%p\n", thisline + readbytes, thisline + readbytes);
+	ha_notice(">>> linesize=%d\n", linesize);
 	while(fgets_from_mem(thisline + readbytes, linesize - readbytes, cfg->content, cfg->content + cfg->size)) {
 	//while (fgets(thisline + readbytes, linesize - readbytes, f) != NULL) {
 		int arg, kwm = KWM_STD;
 		char *end;
-		char *args[MAX_LINE_ARGS + 1];
+		char *args[MAX_LINE_ARGS + 1]; // 65 mots sur ligne
 		char *line = thisline;
+
+		ha_notice("++ readbytes=%d\n", readbytes);
+		ha_notice("++ thisline=%s, addr=%p\n", thisline, thisline);
+		ha_notice("++ thisline + readbyes=%s, addr=%p\n", thisline + readbytes, thisline + readbytes);
+		ha_notice("++ linesize=%d\n", linesize);
+		
+		ha_notice(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> new line <<<>>>>>>>>>>\n");
+		ha_notice(">>>%s<<<\n", line);
+		ha_notice(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> new line <<<>>>>>>>>>>\n");
+
+		ha_notice(">>>len=%ld, end=%s<<<\n", strlen(line), line + strlen(line));
+		
+
+
+		ha_notice("1. >>>> line=%s, readbytes=%d, linesize=%d, (linesize - readbytes)=%d, missing_lf=%d\n", line, readbytes, linesize, (linesize - readbytes), missing_lf);
 
 		if (missing_lf != -1) {
 			ha_alert("parsing [%s:%d]: Stray NUL character at position %d.\n",
@@ -1782,6 +1804,7 @@ next_line:
 
 		linenum++;
 		global.cfg_curr_line = linenum;
+		ha_notice("2. >>>> line=%s, readbytes=%d, linesize=%d, (linesize - readbytes)=%d, missing_lf=%d, linenum=%d\n", line, readbytes, linesize, (linesize - readbytes), missing_lf, linenum);
 
 		if (fatal >= 50) {
 			ha_alert("parsing [%s:%d]: too many fatal errors (%d), stopping now.\n", file, linenum, fatal);
@@ -1789,8 +1812,9 @@ next_line:
 		}
 
 		end = line + strlen(line);
-
-		if (end-line == linesize-1 && *(end-1) != '\n') {
+		ha_notice("3. >>>> line =%s, end=%s, strlen(line)=%ld\n", line, end, strlen(line));
+		ha_notice("4. >>>> line=%s, (end - line)=%ld, linesize=%d, (end-1)=%s\n", line, (end - line), linesize, (end-1));
+		if (end - line == linesize - 1 && *(end-1) != '\n') {
 			/* Check if we reached the limit and the last char is not \n.
 			 * Watch out for the last line without the terminating '\n'!
 			 */
@@ -1815,7 +1839,7 @@ next_line:
 		}
 
 		readbytes = 0;
-
+		ha_notice("5. >>>> line=%s\n", line);
 		if (end > line && *(end-1) == '\n') {
 			/* kill trailing LF */
 			*(end - 1) = 0;
@@ -1824,6 +1848,8 @@ next_line:
 			/* mark this line as truncated */
 			missing_lf = end - line;
 		}
+
+		ha_notice("6. >>>> line=%s\n", line);
 
 		/* skip leading spaces */
 		while (isspace((unsigned char)*line))
@@ -2415,6 +2441,11 @@ next_line:
 		}
 
 		/* check for keyword modifiers "no" and "default" */
+		ha_notice("7. >>>> line=%s, readbytes=%d\n", line, readbytes);
+		for(int x=0; x<10; x++) {
+			ha_notice(">>>>>> arg[%d]: %s\n", x, args[x]);
+		}
+		
 		if (strcmp(args[0], "no") == 0) {
 			char *tmp;
 
@@ -2443,19 +2474,25 @@ next_line:
 			err_code |= ERR_ALERT | ERR_FATAL;
 			fatal++;
 		}
-
+		/*  	struct cfg_section *cs = NULL, *pcs = NULL;
+		 *      struct cfg_section *ics;
+		 *
+		 *
+		 * */
 		/* detect section start */
+		ha_notice("8. >>>> line=%s, readbytes=%d\n", line, readbytes);
 		list_for_each_entry(ics, &sections, list) {
 			if (strcmp(args[0], ics->section_name) == 0) {
 				cursection = ics->section_name;
-				pcs = cs;
-				cs = ics;
+				pcs = cs; //
+				cs = ics; // 
 				free(global.cfg_curr_section);
 				global.cfg_curr_section = strdup(*args[1] ? args[1] : args[0]);
 				check_section_position(args[0], file, linenum);
 				break;
 			}
 		}
+		ha_notice("9. >>>> line=%s, readbytes=%d, cur_section=%s\n", line, readbytes, cursection);
 
 		if (pcs && pcs->post_section_parser) {
 			int status;
@@ -2475,8 +2512,10 @@ next_line:
 			err_code |= ERR_ALERT | ERR_FATAL;
 			fatal++;
 		} else {
-			int status;
-
+			int status; //  global.mode = MODE_DISCOVERY
+			// status = cs->section_parser(file, linenum, args, kwm, global.mode);
+			ha_notice("10. >>>> line=%s, readbytes=%d, cur_section=%s\n", line, readbytes, cursection);
+			ha_notice("10. >>>> toparse: %s, linenum=%d, kwm=%d\n", file, linenum, kwm);
 			status = cs->section_parser(file, linenum, args, kwm);
 			err_code |= status;
 			if (status & ERR_FATAL)
@@ -2484,7 +2523,10 @@ next_line:
 
 			if (err_code & ERR_ABORT)
 				goto err;
+			ha_notice("10. >>>> exit after section parser, line=%s, readbytes=%d <<<<<<\n", line, readbytes);
 		}
+		ha_notice("11. >>>> take next, this finished line=%s, readbytes=%d\n", line, readbytes);
+		ha_notice("++++++++++++++++++++++++++++++++++++ finished ++++++++++++++++++++++++++++++++++++++++\n");
 	}
 
 	if (missing_lf != -1) {
