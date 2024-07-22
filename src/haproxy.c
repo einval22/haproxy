@@ -1175,7 +1175,7 @@ static int read_cfg(char *progname)
 {
 	char *env_cfgfiles = NULL;
 	int env_err = 0;
-	struct wordlist *wl;
+	struct ram_filelist *cfg;
 	int err_code = 0;
 
 	/* handle cfgfiles that are actually directories */
@@ -1192,25 +1192,25 @@ static int read_cfg(char *progname)
 	setenv("HAPROXY_HTTPS_LOG_FMT", default_https_log_format, 1);
 	setenv("HAPROXY_TCP_LOG_FMT", default_tcp_log_format, 1);
 	setenv("HAPROXY_BRANCH", PRODUCT_BRANCH, 1);
-	list_for_each_entry(wl, &cfg_cfgfiles, list) {
+	list_for_each_entry(cfg, &cfg_cfgfiles, list) {
 		int ret;
 
 		if (env_err == 0) {
 			if (!memprintf(&env_cfgfiles, "%s%s%s",
 					   (env_cfgfiles ? env_cfgfiles : ""),
-					   (env_cfgfiles ? ";" : ""), wl->s))
+					   (env_cfgfiles ? ";" : ""), cfg->name))
 				env_err = 1;
 		}
 
-		ret = readcfgfile(wl->s);
+		ret = readcfgfile(cfg->name);
 		if (ret == -1) {
 			ha_alert("Could not open configuration file %s : %s\n",
-				 wl->s, strerror(errno));
+				 cfg->name, strerror(errno));
 			free(env_cfgfiles);
 			exit(1);
 		}
 		if (ret & (ERR_ABORT|ERR_FATAL))
-			ha_alert("Error(s) found in configuration file : %s\n", wl->s);
+			ha_alert("Error(s) found in configuration file : %s\n", cfg->name);
 		err_code |= ret;
 		if (err_code & ERR_ABORT) {
 			free(env_cfgfiles);
