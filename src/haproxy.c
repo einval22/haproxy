@@ -1175,8 +1175,10 @@ static int read_cfg(char *progname)
 {
 	char *env_cfgfiles = NULL;
 	int env_err = 0;
-	struct ram_filelist *cfg;
+	struct ram_filelist *cfg, *tmp_cfg;
 	int err_code = 0;
+
+	
 
 	/* handle cfgfiles that are actually directories */
 	cfgfiles_expand_directories();
@@ -1192,7 +1194,8 @@ static int read_cfg(char *progname)
 	setenv("HAPROXY_HTTPS_LOG_FMT", default_https_log_format, 1);
 	setenv("HAPROXY_TCP_LOG_FMT", default_tcp_log_format, 1);
 	setenv("HAPROXY_BRANCH", PRODUCT_BRANCH, 1);
-	list_for_each_entry(cfg, &cfg_cfgfiles, list) {
+	list_for_each_entry_safe(cfg, tmp_cfg, &cfg_cfgfiles, list) {
+	
 		int ret;
 
 		if (env_err == 0) {
