@@ -1036,6 +1036,7 @@ static inline unsigned long long rdtsc()
  */
 struct list;
 int list_append_word(struct list *li, const char *str, char **err);
+int list_append_cfgfile(struct list *li, const char *name, char *addr, size_t size, char **err);
 
 int dump_text(struct buffer *out, const char *buf, int bsize);
 int dump_binary(struct buffer *out, const char *buf, int bsize);

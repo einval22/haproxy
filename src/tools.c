@@ -4915,6 +4915,42 @@ fail_wl:
 	return 0;
 }
 
+/* append a copy of string <name>, pointer to some allocated memory and size of
+ * this area at the end of the list <li>.
+ * On failure : return 0 and <err> filled with an error message.
+ * The caller is responsible for freeing the <err>, <name> str and <addr>
+ * memory areas using free().
+ */
+int list_append_cfgfile(struct list *li, const char *name, char *addr,
+		     size_t size, char **err)
+{
+	struct cfgfile *entry = NULL;
+
+	entry = calloc(1, sizeof(*entry));
+	if (!entry) {
+		memprintf(err, "out of memory");
+		goto fail_entry;
+	}
+
+	entry->filename = strdup(name);
+	if (!entry->filename) {
+		memprintf(err, "out of memory");
+		goto fail_entry_name;
+	}
+
+	entry->content = content;
+	entry->size = size;
+	LIST_APPEND(li, &entry->list);
+
+	return 1;
+
+fail_entry_name:
+	free(entry->filename);
+fail_entry:
+	free(entry);
+	return 0;
+}
+
 /* indicates if a memory location may safely be read or not. The trick consists
  * in performing a harmless syscall using this location as an input and letting
  * the operating system report whether it's OK or not. For this we have the
