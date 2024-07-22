@@ -2120,8 +2120,11 @@ static void init(int argc, char **argv)
 	usermsgs_clr("config");
 
 	/* in wait mode, we don't try to read the configuration files */
-	if (!(global.mode & MODE_MWORKER_WAIT))
+	if (!(global.mode & MODE_MWORKER_WAIT)) {
+		read_cfg_in_ram(progname);
 		read_cfg(progname);
+	}
+		
 
 	if (global.mode & MODE_MWORKER) {
 		struct mworker_proc *tmproc;
