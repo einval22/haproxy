@@ -1082,18 +1082,18 @@ static void stdio_quiet(int fd)
  */
 static void cfgfiles_expand_directories(void)
 {
-	struct wordlist *wl, *wlb;
+	struct ram_filelist *cfg, *cfg_tmp;
 	char *err = NULL;
 
-	list_for_each_entry_safe(wl, wlb, &cfg_cfgfiles, list) {
+	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
 		struct stat file_stat;
 		struct dirent **dir_entries = NULL;
 		int dir_entries_nb;
 		int dir_entries_it;
 
-		if (stat(wl->s, &file_stat)) {
+		if (stat(cfg->name, &file_stat)) {
 			ha_alert("Cannot open configuration file/directory %s : %s\n",
-				 wl->s,
+				 cfg->name,
 				 strerror(errno));
 			exit(1);
 		}
@@ -1101,17 +1101,17 @@ static void cfgfiles_expand_directories(void)
 		if (!S_ISDIR(file_stat.st_mode))
 			continue;
 
-		/* from this point wl->s is a directory */
+		/* from this point cfg->name is a directory */
 
-		dir_entries_nb = scandir(wl->s, &dir_entries, NULL, alphasort);
+		dir_entries_nb = scandir(cfg->name, &dir_entries, NULL, alphasort);
 		if (dir_entries_nb < 0) {
 			ha_alert("Cannot open configuration directory %s : %s\n",
-				 wl->s,
+				 cfg->name,
 				 strerror(errno));
 			exit(1);
 		}
 
-		/* for each element in the directory wl->s */
+		/* for each element in the directory cfg->name */
 		for (dir_entries_it = 0; dir_entries_it < dir_entries_nb; dir_entries_it++) {
 			struct dirent *dir_entry = dir_entries[dir_entries_it];
 			char *filename = NULL;
@@ -1124,7 +1124,7 @@ static void cfgfiles_expand_directories(void)
 			    !(d_name_cfgext && d_name_cfgext[4] == '\0'))
 				goto next_dir_entry;
 
-			if (!memprintf(&filename, "%s/%s", wl->s, dir_entry->d_name)) {
+			if (!memprintf(&filename, "%s/%s", cfg->name, dir_entry->d_name)) {
 				ha_alert("Cannot load configuration files %s : out of memory.\n",
 					 filename);
 				exit(1);
@@ -1132,7 +1132,7 @@ static void cfgfiles_expand_directories(void)
 
 			if (stat(filename, &file_stat)) {
 				ha_alert("Cannot open configuration file %s : %s\n",
-					 wl->s,
+					 cfg->name,
 					 strerror(errno));
 				exit(1);
 			}
@@ -1143,7 +1143,7 @@ static void cfgfiles_expand_directories(void)
 			if (!S_ISREG(file_stat.st_mode))
 				goto next_dir_entry;
 
-			if (!list_append_word(&wl->list, filename, &err)) {
+			if (!list_append_file_in_mem(&cfg->list, filename, NULL, 0, &err)) {
 				ha_alert("Cannot load configuration files %s : %s\n",
 					 filename,
 					 err);
@@ -1157,10 +1157,10 @@ next_dir_entry:
 
 		free(dir_entries);
 
-		/* remove the current directory (wl) from cfg_cfgfiles */
-		free(wl->s);
-		LIST_DELETE(&wl->list);
-		free(wl);
+		/* remove the current directory (cfg) from cfgfiles */
+		free(cfg->name);
+		LIST_DELETE(&cfg->list);
+		free(cfg);
 	}
 
 	free(err);
@@ -1831,7 +1831,7 @@ static void init_args(int argc, char **argv)
 				/* now that's a cfgfile list */
 				argv++; argc--;
 				while (argc > 0) {
-					if (!list_append_word(&cfg_cfgfiles, *argv, &err_msg)) {
+					if (!list_append_file_in_mem(&cfg_cfgfiles, *argv, NULL, 0, &err_msg)) {
 						ha_alert("Cannot load configuration file/directory %s : %s\n",
 							 *argv,
 							 err_msg);
@@ -1861,7 +1861,7 @@ static void init_args(int argc, char **argv)
 					global.localpeer_cmdline = 1;
 					break;
 				case 'f' :
-					if (!list_append_word(&cfg_cfgfiles, *argv, &err_msg)) {
+					if (!list_append_file_in_mem(&cfg_cfgfiles, *argv, NULL, 0, &err_msg)) {
 						ha_alert("Cannot load configuration file/directory %s : %s\n",
 							 *argv,
 							 err_msg);
@@ -2629,7 +2629,7 @@ static void init(int argc, char **argv)
 void deinit(void)
 {
 	struct proxy *p = proxies_list, *p0;
-	struct wordlist *wl, *wlb;
+	struct ram_filelist *cfg, *tmp_cfg;
 	struct uri_auth *uap, *ua = NULL;
 	struct logger *log, *logb;
 	struct build_opts_str *bol, *bolb;
@@ -2766,10 +2766,13 @@ void deinit(void)
 		free_logger(log);
 	}
 
-	list_for_each_entry_safe(wl, wlb, &cfg_cfgfiles, list) {
-		free(wl->s);
-		LIST_DELETE(&wl->list);
-		free(wl);
+	list_for_each_entry_safe(cfg, tmp_cfg, &cfg_cfgfiles, list) {
+		if (cfg->addr)
+			free(cfg->addr);
+		if (cfg->name)
+			free(cfg->name);
+		LIST_DELETE(&cfg->list);
+		free(cfg);
 	}
 
 	list_for_each_entry_safe(bol, bolb, &build_opts_list, list) {
