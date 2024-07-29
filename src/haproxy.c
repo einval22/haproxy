@@ -1198,6 +1198,8 @@ static int read_cfg(char *progname)
 	
 		int ret;
 
+		ret = load_cfg_in_ram(cfg, progname);
+
 		if (env_err == 0) {
 			if (!memprintf(&env_cfgfiles, "%s%s%s",
 					   (env_cfgfiles ? env_cfgfiles : ""),
@@ -1245,6 +1247,56 @@ static int read_cfg(char *progname)
 	return err_code;
 }
 
+static void load_cfg_in_ram(struct ram_filelist *cfg, char *progname)
+{
+	struct stat file_stat;
+	char *cfg_content;
+
+	if ((f = fopen(cfg->name,"r")) == NULL) {
+		ha_alert("Could not open configuration file %s : %s\n",
+				cfg->name, strerror(errno));
+		deinit_and_exit(1);
+	}
+
+	if (stat(cfg->name, &file_stat) != 0) {
+		ha_alert("stat() failed for configuration file %s : %s\n",
+			 cfg->name, strerror(errno));
+		goto exit;
+	}
+
+	cfg_content = calloc(file_stat.st_size + 1, sizeof(char));
+	if (!cfg_content) {
+		ha_alert("Not enough memory to read %s. Please, check "
+			 "'ulimit -d' or '-m' option could be set in %s"
+			 "command line\n", cfg->name, progname);
+		goto exit;
+	}
+
+	read_bytes = fread(cfg_content, sizeof(char), file_stat.st_size, f);
+	if (read_bytes != file_stat.st_size) {
+		/* let's check what's happened before quit */
+		if (feof(f))
+			ha_alert("Unexpectedly reached EOF, while reading %s."
+				 "Please, check if it wasn't changed at the meantime"
+				 "by some other application\n.", cfg->name);
+		else
+			ha_alert("Failed to read %s: %s", cfg->name, strerror(errno));
+
+		goto free_mem;
+	}
+	cfg->addr = cfg_content;
+	cfg->size = file_stat.st_size;
+
+	fclose (f);
+	return;
+
+free_mem:
+	free(cfg_content);
+exit:
+	fclose (f);
+	deinit_and_exit(1);
+}
+
 /* Reads config files in RAM. Terminates process with an alert and calls
  * deinit_and_exit(1) if we are luck of memory. deinit_and_exit(1) frees all
  * resources that might be allocated before, cfgfiles list included.
@@ -1255,7 +1307,10 @@ static void read_cfg_in_ram(char *progname)
 	struct stat file_stat;
 	char *cfg_content;
 	FILE *f = NULL;
-	size_t read_bytes;
+	char *env_cfgfiles = NULL;
+	size_t read_bytes;	
+	int env_err = 0;
+	int err_code = 0;
 
 	/* handle cfgfiles that are actually directories */
 	cfgfiles_expand_directories();
@@ -1266,6 +1321,7 @@ static void read_cfg_in_ram(char *progname)
 	/* load config files in RAM */
 	list_for_each_entry_safe(cfg, tmp_cfg, &cfg_cfgfiles, list) {
 		cfg_content = NULL;
+		int ret;
 
 		if ((f = fopen(cfg->name,"r")) == NULL) {
 			ha_alert("Could not open configuration file %s : %s\n",
