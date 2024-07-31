@@ -4883,46 +4883,13 @@ unsigned char utf8_next(const char *s, int len, unsigned int *c)
 	return code | ((p-(unsigned char *)s)&0x0f);
 }
 
-/* append a copy of string <str> (in a wordlist) at the end of the list <li>
- * On failure : return 0 and <err> filled with an error message.
- * The caller is responsible for freeing the <err> and <str> copy
- * memory area using free()
- */
-int list_append_word(struct list *li, const char *str, char **err)
-{
-	struct wordlist *wl;
-
-	wl = calloc(1, sizeof(*wl));
-	if (!wl) {
-		memprintf(err, "out of memory");
-		goto fail_wl;
-	}
-
-	wl->s = strdup(str);
-	if (!wl->s) {
-		memprintf(err, "out of memory");
-		goto fail_wl_s;
-	}
-
-	LIST_APPEND(li, &wl->list);
-
-	return 1;
-
-fail_wl_s:
-	free(wl->s);
-fail_wl:
-	free(wl);
-	return 0;
-}
-
-/* append a copy of string <name>, pointer to some allocated memory and size of
+/* append a copy of string <filename>, pointer to some allocated memory and size of
  * this area at the end of the list <li>.
  * On failure : return 0 and <err> filled with an error message.
  * The caller is responsible for freeing the <err>, <name> str and <addr>
  * memory areas using free().
  */
-int list_append_cfgfile(struct list *li, const char *name, char *addr,
-		     size_t size, char **err)
+int list_append_cfgfile(struct list *li, const char *filename, char **err)
 {
 	struct cfgfile *entry = NULL;
 
@@ -4938,8 +4905,6 @@ int list_append_cfgfile(struct list *li, const char *name, char *addr,
 		goto fail_entry_name;
 	}
 
-	entry->content = content;
-	entry->size = size;
 	LIST_APPEND(li, &entry->list);
 
 	return 1;
