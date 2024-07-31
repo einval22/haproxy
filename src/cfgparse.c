@@ -1765,7 +1765,8 @@ int readcfgfile(const struct cfgfile *file)
 	}
 
 next_line:
-	while (fgets(thisline + readbytes, linesize - readbytes, f) != NULL) {
+	while(fgets_from_mem(thisline + readbytes, linesize - readbytes, cfg->content, cfg->content + cfg->size)) {
+	//while (fgets(thisline + readbytes, linesize - readbytes, f) != NULL) {
 		int arg, kwm = KWM_STD;
 		char *end;
 		char *args[MAX_LINE_ARGS + 1];
@@ -1806,9 +1807,9 @@ next_line:
 				continue;
 			}
 
-			readbytes = linesize - 1;
-			linesize = newlinesize;
-			thisline = newline;
+			readbytes = linesize - 1; // 2047
+			linesize = newlinesize; // 4096
+			thisline = newline; // 
 			linenum--;
 			continue;
 		}

@@ -1171,10 +1171,9 @@ next_dir_entry:
  * failed to read the all filesize. deinit() assures on error path, that all
  * ressources, which might be allocated before are freed, included cfgfiles list.
  */
-static int load_cfg_in_ram(struct cfgfile *cfg, char *progname)
+static int read_cfg_in_ram(char* filename, char* cfg_content, char *progname)
 {
 	struct stat file_stat;
-	char *cfg_content;
 
 	if ((f = fopen(cfg->filename,"r")) == NULL) {
 		ha_alert("Could not open configuration file %s : %s\n",
@@ -1207,19 +1206,18 @@ static int load_cfg_in_ram(struct cfgfile *cfg, char *progname)
 			ha_alert("Failed to read %s: %s", cfg->filename, strerror(errno));
 		goto free_mem;
 	}
-	cfg->content = cfg_content;
-	cfg->size = file_stat.st_size;
+
 
 	fclose(f);
 
-	return 0;
+	return read_bytes;
 
 free_mem:
 	free(cfg_content);
 exit_and_close:
 	fclose (f);
 
-	return 1;
+	return -1;
 }
 
 /* Reads config files. Terminates process with exit(1), if we are luck of RAM,
@@ -1249,10 +1247,16 @@ static int read_cfg(char *progname)
 	setenv("HAPROXY_BRANCH", PRODUCT_BRANCH, 1);
 	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
 		int ret = 0;
+		int read_bytes = 0;
+		char *content = NULL;
 
-		if (load_cfg_in_ram(cfg, progname) != 0) {
+		
+		read_bytes = read_cfg_in_ram(cfg->filename, content, progname);
+		if (read_bytes < 0) {
 			goto exit;	
 		}
+		cfg->content = content;
+		cfg->size = read_bytes;
 
 		if (!memprintf(&env_cfgfiles, "%s%s%s",	(env_cfgfiles ? env_cfgfiles : ""), (env_cfgfiles ? ";" : ""), cfg->filename)) {
 			/* free what we've already allocated and free cfglist */
@@ -1260,7 +1264,7 @@ static int read_cfg(char *progname)
 			goto exit;
 		}
 
-		ret = readcfgfile(cfg->filename);
+		ret = readcfgfile(cfg);
 		if (ret == -1) {
 			ha_alert("Could not parse configuration file %s : %s\n",
 				 cfg->filename, strerror(errno));

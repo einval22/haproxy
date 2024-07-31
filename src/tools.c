@@ -6691,6 +6691,61 @@ static int init_tools_per_thread()
 	return 1;
 }
 REGISTER_PER_THREAD_INIT(init_tools_per_thread);
+//**buf => pos
+//*end - thisline + size
+//ret(thisline) = fgets_from_mem(thisline, size, **buf, *end)
+//fgets_from_mem(thisline, )
+//  (fgets(thisline + readbytes, linesize - readbytes, f) != NULL)
+//while (fgets(thisline + readbytes, linesize - readbytes, f) != NULL) {
+char *fgets_from_mem(char* buf, int size, char *position, char *end)
+{
+	char *pos = position; /* ptr to current position in cfg->content string */
+	char *new_pos;
+	int len = 0;
+
+	/* EOF */
+	if (position == end)
+		return NULL;
+
+	size--; /* keep fgets behaviour, reads at most one less than size */
+	new_pos = memchr(position, '\n', size);
+	if (new_pos) {
+		len = new_pos - position;
+		memcpy(buf, position, len);
+		*(buf + len + 1)  = '\0';
+		position = new_pos;
+
+		return buf;
+	} else {
+		/* closer to end */
+		if (position + size >= end) {
+			/* copy the rest of line till the end as position + size >= end
+			 * so we are not to risk of overflow the buffer
+			 */
+			len = end - position;
+			memcpy(buf, position, len);
+			*(buf + len + 1)  = '\0';
+			position = end;
+
+			return buf;
+			
+		} else {
+			/* case, when we just continue "reading" up to the given size,
+			 * update the position ptr and return a buffer to caller
+			 * this depends from usage, in particular in readcfg
+			 * (the caller) we realloc the buffer again and grab
+			 * again with new size a little bit of
+			 * memory from updated position to scan it with memchr
+			 */
+			memcpy(buf, position, size);
+			*(buf + size + 1)  = '\0';
+			position += size;
+			return buf;
+		}
+	}
+
+	return NULL;
+}
 
 /*
  * Local variables:
