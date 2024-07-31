@@ -1082,7 +1082,7 @@ static void stdio_quiet(int fd)
  */
 static void cfgfiles_expand_directories(void)
 {
-	struct ram_filelist *cfg, *cfg_tmp;
+	struct cfgfile *cfg, *cfg_tmp;
 	char *err = NULL;
 
 	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
@@ -1091,9 +1091,9 @@ static void cfgfiles_expand_directories(void)
 		int dir_entries_nb;
 		int dir_entries_it;
 
-		if (stat(cfg->name, &file_stat)) {
+		if (stat(cfg->filename, &file_stat)) {
 			ha_alert("Cannot open configuration file/directory %s : %s\n",
-				 cfg->name,
+				 cfg->filename,
 				 strerror(errno));
 			exit(1);
 		}
@@ -1103,10 +1103,10 @@ static void cfgfiles_expand_directories(void)
 
 		/* from this point cfg->name is a directory */
 
-		dir_entries_nb = scandir(cfg->name, &dir_entries, NULL, alphasort);
+		dir_entries_nb = scandir(cfg->filename, &dir_entries, NULL, alphasort);
 		if (dir_entries_nb < 0) {
 			ha_alert("Cannot open configuration directory %s : %s\n",
-				 cfg->name,
+				 cfg->filename,
 				 strerror(errno));
 			exit(1);
 		}
@@ -1124,7 +1124,7 @@ static void cfgfiles_expand_directories(void)
 			    !(d_name_cfgext && d_name_cfgext[4] == '\0'))
 				goto next_dir_entry;
 
-			if (!memprintf(&filename, "%s/%s", cfg->name, dir_entry->d_name)) {
+			if (!memprintf(&filename, "%s/%s", cfg->filename, dir_entry->d_name)) {
 				ha_alert("Cannot load configuration files %s : out of memory.\n",
 					 filename);
 				exit(1);
@@ -1132,7 +1132,7 @@ static void cfgfiles_expand_directories(void)
 
 			if (stat(filename, &file_stat)) {
 				ha_alert("Cannot open configuration file %s : %s\n",
-					 cfg->name,
+					 cfg->filename,
 					 strerror(errno));
 				exit(1);
 			}
@@ -1143,7 +1143,7 @@ static void cfgfiles_expand_directories(void)
 			if (!S_ISREG(file_stat.st_mode))
 				goto next_dir_entry;
 
-			if (!list_append_file_in_mem(&cfg->list, filename, NULL, 0, &err)) {
+			if (!list_append_cfgfile(&cfg->list, filename, &err)) {
 				ha_alert("Cannot load configuration files %s : %s\n",
 					 filename,
 					 err);
@@ -1158,91 +1158,12 @@ next_dir_entry:
 		free(dir_entries);
 
 		/* remove the current directory (cfg) from cfgfiles */
-		free(cfg->name);
+		free(cfg->filename);
 		LIST_DELETE(&cfg->list);
 		free(cfg);
 	}
 
 	free(err);
-}
-
-/* Reads config files. Terminates process with exit(1), if we are luck of RAM,
- * couldn't open provided file(s) or parser has detected some fatal error.
- * Otherwise, returns an err_code, which may contain 0 (OK) or ERR_WARN,
- * ERR_ALERT. It could be used in further initialization stages.
- */
-static int read_cfg(char *progname)
-{
-	char *env_cfgfiles = NULL;
-	int env_err = 0;
-	struct cfgfile *cfg, *tmp_cfg;
-	int err_code = 0;
-
-	/* handle cfgfiles that are actually directories */
-	cfgfiles_expand_directories();
-
-	if (LIST_ISEMPTY(&cfg_cfgfiles))
-		usage(progname);
-
-	/* temporary create environment variables with default
-	 * values to ease user configuration. Do not forget to
-	 * unset them after the list_for_each_entry loop.
-	 */
-	setenv("HAPROXY_HTTP_LOG_FMT", default_http_log_format, 1);
-	setenv("HAPROXY_HTTPS_LOG_FMT", default_https_log_format, 1);
-	setenv("HAPROXY_TCP_LOG_FMT", default_tcp_log_format, 1);
-	setenv("HAPROXY_BRANCH", PRODUCT_BRANCH, 1);
-	list_for_each_entry_safe(cfg, tmp_cfg, &cfg_cfgfiles, list) {
-	
-		int ret;
-
-		ret = load_cfg_in_ram(cfg, progname);
-
-		if (env_err == 0) {
-			if (!memprintf(&env_cfgfiles, "%s%s%s",
-					   (env_cfgfiles ? env_cfgfiles : ""),
-					   (env_cfgfiles ? ";" : ""), cfg->name))
-				env_err = 1;
-		}
-
-		ret = readcfgfile(cfg->filename);
-		if (ret == -1) {
-			ha_alert("Could not open configuration file %s : %s\n",
-				 cfg->name, strerror(errno));
-			free(env_cfgfiles);
-			exit(1);
-		}
-		if (ret & (ERR_ABORT|ERR_FATAL))
-			ha_alert("Error(s) found in configuration file : %s\n", cfg->name);
-		err_code |= ret;
-		if (err_code & ERR_ABORT) {
-			free(env_cfgfiles);
-			exit(1);
-		}
-	}
-	/* remove temporary environment variables. */
-	unsetenv("HAPROXY_BRANCH");
-	unsetenv("HAPROXY_HTTP_LOG_FMT");
-	unsetenv("HAPROXY_HTTPS_LOG_FMT");
-	unsetenv("HAPROXY_TCP_LOG_FMT");
-
-	/* do not try to resolve arguments nor to spot inconsistencies when
-	 * the configuration contains fatal errors caused by files not found
-	 * or failed memory allocations.
-	 */
-	if (err_code & (ERR_ABORT|ERR_FATAL)) {
-		ha_alert("Fatal errors found in configuration.\n");
-		free(env_cfgfiles);
-		exit(1);
-	}
-	if (env_err) {
-		ha_alert("Could not allocate memory for HAPROXY_CFGFILES env variable\n");
-		exit(1);
-	}
-	setenv("HAPROXY_CFGFILES", env_cfgfiles, 1);
-	free(env_cfgfiles);
-
-	return err_code;
 }
 
 /* Reads config files in RAM. Returns 0 on success and 1 on error, emits an
@@ -1301,19 +1222,15 @@ exit_and_close:
 	return 1;
 }
 
-/* Reads config files in RAM. Terminates process with an alert and calls
- * deinit_and_exit(1) if we are luck of memory. deinit_and_exit(1) frees all
- * resources that might be allocated before, cfgfiles list included.
+/* Reads config files. Terminates process with exit(1), if we are luck of RAM,
+ * couldn't open provided file(s) or parser has detected some fatal error.
+ * Otherwise, returns an err_code, which may contain 0 (OK) or ERR_WARN,
+ * ERR_ALERT. It could be used in further initialization stages.
  */
-static void read_cfg_in_ram(char *progname)
+static int read_cfg(char *progname)
 {
-	struct ram_filelist *cfg, *tmp_cfg;
-	struct stat file_stat;
-	char *cfg_content;
-	FILE *f = NULL;
 	char *env_cfgfiles = NULL;
-	size_t read_bytes;	
-	int env_err = 0;
+	struct cfgfile *cfg, *cfg_tmp;
 	int err_code = 0;
 
 	/* handle cfgfiles that are actually directories */
@@ -1322,55 +1239,59 @@ static void read_cfg_in_ram(char *progname)
 	if (LIST_ISEMPTY(&cfg_cfgfiles))
 		usage(progname);
 
-	/* load config files in RAM */
-	list_for_each_entry_safe(cfg, tmp_cfg, &cfg_cfgfiles, list) {
-		cfg_content = NULL;
-		int ret;
+	/* temporary create environment variables with default
+	 * values to ease user configuration. Do not forget to
+	 * unset them after the list_for_each_entry loop.
+	 */
+	setenv("HAPROXY_HTTP_LOG_FMT", default_http_log_format, 1);
+	setenv("HAPROXY_HTTPS_LOG_FMT", default_https_log_format, 1);
+	setenv("HAPROXY_TCP_LOG_FMT", default_tcp_log_format, 1);
+	setenv("HAPROXY_BRANCH", PRODUCT_BRANCH, 1);
+	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
+		int ret = 0;
 
-		if ((f = fopen(cfg->name,"r")) == NULL) {
-			ha_alert("Could not open configuration file %s : %s\n",
-				 cfg->name, strerror(errno));
-			deinit();
+		if (load_cfg_in_ram(cfg, progname) != 0) {
+			goto exit;	
 		}
 
-		if (stat(cfg->name, &file_stat) != 0) {
-			ha_alert("stat() failed for configuration file %s : %s\n",
-				 cfg->name, strerror(errno));
+		if (!memprintf(&env_cfgfiles, "%s%s%s",	(env_cfgfiles ? env_cfgfiles : ""), (env_cfgfiles ? ";" : ""), cfg->filename)) {
+			/* free what we've already allocated and free cfglist */
+			ha_alert("Could not allocate memory for HAPROXY_CFGFILES env variable\n");
 			goto exit;
 		}
 
-		cfg_content = calloc(file_stat.st_size + 1, sizeof(char));
-		if (!cfg_content) {
-			ha_alert("Not enough memory to read %s. Please, check "
-				 "'ulimit -d' or '-m' option could be set in %s"
-				 "command line\n", cfg->name, progname);
+		ret = readcfgfile(cfg->filename);
+		if (ret == -1) {
+			ha_alert("Could not parse configuration file %s : %s\n",
+				 cfg->filename, strerror(errno));
 			goto exit;
 		}
-
-		read_bytes = fread(cfg_content, sizeof(char), file_stat.st_size, f);
-		if (read_bytes != file_stat.st_size) {
-			/* let's check what's happened before quit */
-			if (feof(f))
-				ha_alert("Unexpectedly reached EOF, while reading %s."
-					 "Please, check if it wasn't changed at the meantime"
-					 "by some other application\n.", cfg->name);
-			else
-				ha_alert("Failed to read %s: %s", cfg->name, strerror(errno));
-
-			goto free_mem;
+		
+		/* do not try to resolve arguments nor to spot inconsistencies when
+		* the configuration contains fatal errors caused by files not found
+		* or failed memory allocations.
+		*/
+		if (ret & (ERR_ABORT|ERR_FATAL)) {
+			ha_alert("Fatal error(s) found in configuration file : %s\n", cfg->filename);
+			goto exit;
 		}
-		cfg->addr = cfg_content;
-		cfg->size = file_stat.st_size;
-
-		fclose (f);
+		err_code |= ret;
 	}
 
-	return;
+	setenv("HAPROXY_CFGFILES", env_cfgfiles, 1);
+	free(env_cfgfiles);
+	/* remove temporary environment variables. */
+	unsetenv("HAPROXY_BRANCH");
+	unsetenv("HAPROXY_HTTP_LOG_FMT");
+	unsetenv("HAPROXY_HTTPS_LOG_FMT");
+	unsetenv("HAPROXY_TCP_LOG_FMT");
 
-free_mem:
-	free(cfg_content);
-exit:
-	fclose (f);
+	return err_code;
+
+goto exit:
+	if (env_cfgfiles)
+		free(env_cfgfiles);
+	/* cfglist will be freed in deinit() part */
 	deinit_and_exit(1);
 }
 
@@ -1963,7 +1884,7 @@ static void init_args(int argc, char **argv)
 				/* now that's a cfgfile list */
 				argv++; argc--;
 				while (argc > 0) {
-					if (!list_append_file_in_mem(&cfg_cfgfiles, *argv, NULL, 0, &err_msg)) {
+					if (!list_append_cfgfile(&cfg_cfgfiles, *argv, &err_msg)) {
 						ha_alert("Cannot load configuration file/directory %s : %s\n",
 							 *argv,
 							 err_msg);

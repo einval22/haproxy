@@ -1728,7 +1728,7 @@ static int cfg_parse_global_def_path(char **args, int section_type, struct proxy
  * Only the two first ones can stop processing, the two others are just
  * indicators.
  */
-int readcfgfile(const char *file)
+int readcfgfile(const struct cfgfile *file)
 {
 	char *thisline = NULL;
 	int linesize = LINESIZE;
@@ -1756,13 +1756,8 @@ int readcfgfile(const char *file)
 		goto err;
 	}
 
-	if ((f = fopen(file,"r")) == NULL) {
-		err_code = -1;
-		goto err;
-	}
-
 	/* change to the new dir if required */
-	if (!cfg_apply_default_path(file, NULL, &errmsg)) {
+	if (!cfg_apply_default_path(file->filename, NULL, &errmsg)) {
 		ha_alert("parsing [%s:%d]: failed to apply default-path: %s.\n", file, linenum, errmsg);
 		free(errmsg);
 		err_code = -1;
