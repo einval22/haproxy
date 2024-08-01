@@ -1750,16 +1750,14 @@ fail_entry:
 	return 0;
 }
 
-/* Reads config files in RAM. Returns 0 on success and 1 on error, emits an
- * alert and calls deinit(), if we can't open a file, luck of memory or
- * failed to read the all filesize. deinit() assures on error path, that all
- * ressources, which might be allocated before are freed, included cfgfiles list.
+/* Reads config file in RAM. Returns the number of bytes successfully read
+ * until EOF and stores them at *cfg_content. Otherwise emits alerts, performs
+ * needed clean-up routines on error path and returns -1.
  */
 int read_cfg_in_ram(char* filename, char** cfg_content)
 {
 	FILE *f;
 	struct stat file_stat;
-	char *content;
 	int read_bytes;
 
 	if ((f = fopen(filename,"r")) == NULL) {
@@ -1774,15 +1772,15 @@ int read_cfg_in_ram(char* filename, char** cfg_content)
 		goto exit_and_close;
 	}
 
-	content = malloc(file_stat.st_size * sizeof(char));
-	if (!content) {
+	*cfg_content = malloc(file_stat.st_size * sizeof(char));
+	if (!*cfg_content) {
 		ha_alert("Not enough memory to read %s. Please, check "
 			 "'ulimit -d' or '-m' option could be set via "
 			 "command line\n", filename);
 		goto exit_and_close;
 	}
 
-	read_bytes = fread(content, sizeof(char), file_stat.st_size, f);
+	read_bytes = fread(*cfg_content, sizeof(char), file_stat.st_size, f);
 	if (read_bytes != file_stat.st_size) {
 		/* let's check what's happened before quit */
 		if (feof(f))
@@ -1793,14 +1791,13 @@ int read_cfg_in_ram(char* filename, char** cfg_content)
 			ha_alert("Failed to read %s: %s", filename, strerror(errno));
 		goto free_mem;
 	}
-	
-	*cfg_content = content;
+
 	fclose(f);
 
 	return read_bytes;
 
 free_mem:
-	free(content);
+	free(*cfg_content);
 exit_and_close:
 	fclose(f);
 

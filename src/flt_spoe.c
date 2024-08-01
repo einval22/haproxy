@@ -2203,7 +2203,6 @@ static int parse_spoe_flt(char **args, int *cur_arg, struct proxy *px,
 	struct logger               *logger, *loggerback;
 	char                        *file = NULL, *engine = NULL;
 	int                          ret, pos = *cur_arg + 1;
-	int 			     read_bytes = 0;
 
 	LIST_INIT(&curmsgs);
 	LIST_INIT(&curgrps);
@@ -2268,9 +2267,9 @@ static int parse_spoe_flt(char **args, int *cur_arg, struct proxy *px,
 	 * stored in RAM as separate chunks (see struct cfgfile in cfgparse.h),
 	 * these chunks chained in cfg_cfgfiles global list.
 	 */
-	cfg_file.size = read_cfg_in_ram(cfg_file.filename, &cfg_file->content);
+	cfg_file.size = read_cfg_in_ram(cfg_file.filename, &cfg_file.content);
 	if (cfg_file.size < 0) {
-		goto error;	
+		goto error;
 	}
 	ret = readcfgfile(&cfg_file);
 
