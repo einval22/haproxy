@@ -1717,6 +1717,96 @@ static int cfg_parse_global_def_path(char **args, int section_type, struct proxy
 	return ret;
 }
 
+/* append a copy of string <filename>, pointer to some allocated memory and size of
+ * this area at the end of the list <li>.
+ * On failure : return 0 and <err> filled with an error message.
+ * The caller is responsible for freeing the <err>, <name> str and <addr>
+ * memory areas using free().
+ */
+int list_append_cfgfile(struct list *li, const char *filename, char **err)
+{
+	struct cfgfile *entry = NULL;
+
+	entry = calloc(1, sizeof(*entry));
+	if (!entry) {
+		memprintf(err, "out of memory");
+		goto fail_entry;
+	}
+
+	entry->filename = strdup(filename);
+	if (!entry->filename) {
+		memprintf(err, "out of memory");
+		goto fail_entry_name;
+	}
+
+	LIST_APPEND(li, &entry->list);
+
+	return 1;
+
+fail_entry_name:
+	free(entry->filename);
+fail_entry:
+	free(entry);
+	return 0;
+}
+
+/* Reads config files in RAM. Returns 0 on success and 1 on error, emits an
+ * alert and calls deinit(), if we can't open a file, luck of memory or
+ * failed to read the all filesize. deinit() assures on error path, that all
+ * ressources, which might be allocated before are freed, included cfgfiles list.
+ */
+int read_cfg_in_ram(char* filename, char** cfg_content)
+{
+	FILE *f;
+	struct stat file_stat;
+	char *content;
+	int read_bytes;
+
+	if ((f = fopen(filename,"r")) == NULL) {
+		ha_alert("Could not open configuration file %s : %s\n",
+				filename, strerror(errno));
+		return 1;
+	}
+
+	if (stat(filename, &file_stat) != 0) {
+		ha_alert("stat() failed for configuration file %s : %s\n",
+			 filename, strerror(errno));
+		goto exit_and_close;
+	}
+
+	content = malloc(file_stat.st_size * sizeof(char));
+	if (!content) {
+		ha_alert("Not enough memory to read %s. Please, check "
+			 "'ulimit -d' or '-m' option could be set via "
+			 "command line\n", filename);
+		goto exit_and_close;
+	}
+
+	read_bytes = fread(content, sizeof(char), file_stat.st_size, f);
+	if (read_bytes != file_stat.st_size) {
+		/* let's check what's happened before quit */
+		if (feof(f))
+			ha_alert("Unexpectedly reached EOF, while reading %s."
+				 "Please, check if it wasn't changed at the meantime"
+				 "by some other application\n.", filename);
+		else
+			ha_alert("Failed to read %s: %s", filename, strerror(errno));
+		goto free_mem;
+	}
+	
+	*cfg_content = content;
+	fclose(f);
+
+	return read_bytes;
+
+free_mem:
+	free(content);
+exit_and_close:
+	fclose(f);
+
+	return -1;
+}
+
 /*
  * This function reads and parses the configuration file given in the argument.
  * Returns the error code, 0 if OK, -1 if the config file couldn't be opened,
@@ -1732,7 +1822,7 @@ int readcfgfile(const struct cfgfile *file)
 {
 	char *thisline = NULL;
 	int linesize = LINESIZE;
-	FILE *f = NULL;
+	//FILE *f = NULL;
 	int linenum = 0;
 	int err_code = 0;
 	struct cfg_section *cs = NULL, *pcs = NULL;
@@ -1746,11 +1836,12 @@ int readcfgfile(const struct cfgfile *file)
 	int nested_cond_lvl = 0;
 	enum nested_cond_state nested_conds[MAXNESTEDCONDS];
 	char *errmsg = NULL;
+	char *cur_position = file->content;
 
 	global.cfg_curr_line = 0;
-	global.cfg_curr_file = file;
+	global.cfg_curr_file = file->filename;
 
-	if ((thisline = malloc(sizeof(*thisline) * linesize)) == NULL) {
+	if ((thisline = calloc((sizeof(*thisline) * linesize), sizeof(*thisline))) == NULL) {
 		ha_alert("Out of memory trying to allocate a buffer for a configuration line.\n");
 		err_code = -1;
 		goto err;
@@ -1758,21 +1849,21 @@ int readcfgfile(const struct cfgfile *file)
 
 	/* change to the new dir if required */
 	if (!cfg_apply_default_path(file->filename, NULL, &errmsg)) {
-		ha_alert("parsing [%s:%d]: failed to apply default-path: %s.\n", file, linenum, errmsg);
+		ha_alert("parsing [%s:%d]: failed to apply default-path: %s.\n", file->filename, linenum, errmsg);
 		free(errmsg);
 		err_code = -1;
 		goto err;
 	}
 
-	ha_notice(">>> content=%s\n", cfg->content);
-	ha_notice(">>> size=%ld\n", cfg->size );
+	ha_notice(">>> content=%s\n", file->content);
+	ha_notice(">>> size=%d\n", file->size );
 	
 next_line:
 	ha_notice(">>> readbytes=%d\n", readbytes);
 	ha_notice(">>> thisline=%s, addr=%p\n", thisline, thisline);
 	ha_notice(">>> thisline + readbyes=%s, addr=%p\n", thisline + readbytes, thisline + readbytes);
 	ha_notice(">>> linesize=%d\n", linesize);
-	while(fgets_from_mem(thisline + readbytes, linesize - readbytes, cfg->content, cfg->content + cfg->size)) {
+	while(fgets_from_mem(thisline + readbytes, linesize - readbytes, &cur_position, file->content + file->size)) {
 	//while (fgets(thisline + readbytes, linesize - readbytes, f) != NULL) {
 		int arg, kwm = KWM_STD;
 		char *end;
@@ -1796,7 +1887,7 @@ next_line:
 
 		if (missing_lf != -1) {
 			ha_alert("parsing [%s:%d]: Stray NUL character at position %d.\n",
-			         file, linenum, (missing_lf + 1));
+			         file->filename, linenum, (missing_lf + 1));
 			err_code |= ERR_ALERT | ERR_FATAL;
 			missing_lf = -1;
 			break;
@@ -1807,7 +1898,7 @@ next_line:
 		ha_notice("2. >>>> line=%s, readbytes=%d, linesize=%d, (linesize - readbytes)=%d, missing_lf=%d, linenum=%d\n", line, readbytes, linesize, (linesize - readbytes), missing_lf, linenum);
 
 		if (fatal >= 50) {
-			ha_alert("parsing [%s:%d]: too many fatal errors (%d), stopping now.\n", file, linenum, fatal);
+			ha_alert("parsing [%s:%d]: too many fatal errors (%d), stopping now.\n", file->filename, linenum, fatal);
 			break;
 		}
 
@@ -1824,7 +1915,7 @@ next_line:
 			newline = realloc(thisline, sizeof(*thisline) * newlinesize);
 			if (newline == NULL) {
 				ha_alert("parsing [%s:%d]: line too long, cannot allocate memory.\n",
-					 file, linenum);
+					 file->filename, linenum);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				fatal++;
 				linenum--;
@@ -1856,7 +1947,7 @@ next_line:
 			line++;
 
 		if (*line == '[') {/* This is the beginning if a scope */
-			err_code |= cfg_parse_scope(file, linenum, line);
+			err_code |= cfg_parse_scope(file->filename, linenum, line);
 			goto next_line;
 		}
 
@@ -1875,7 +1966,7 @@ next_line:
 				size_t newpos = sanitize_for_printing(line, errptr - line, 80);
 
 				ha_alert("parsing [%s:%d]: unmatched quote at position %d:\n"
-					 "  %s\n  %*s\n", file, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
+					 "  %s\n  %*s\n", file->filename, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
 				err_code |= ERR_ALERT | ERR_FATAL;
 				fatal++;
 				goto next_line;
@@ -1885,7 +1976,7 @@ next_line:
 				size_t newpos = sanitize_for_printing(line, errptr - line, 80);
 
 				ha_alert("parsing [%s:%d]: unmatched brace in environment variable name at position %d:\n"
-					 "  %s\n  %*s\n", file, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
+					 "  %s\n  %*s\n", file->filename, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
 				err_code |= ERR_ALERT | ERR_FATAL;
 				fatal++;
 				goto next_line;
@@ -1895,7 +1986,7 @@ next_line:
 				size_t newpos = sanitize_for_printing(line, errptr - line, 80);
 
 				ha_alert("parsing [%s:%d]: forbidden first char in environment variable name at position %d:\n"
-					 "  %s\n  %*s\n", file, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
+					 "  %s\n  %*s\n", file->filename, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
 				err_code |= ERR_ALERT | ERR_FATAL;
 				fatal++;
 				goto next_line;
@@ -1905,7 +1996,7 @@ next_line:
 				size_t newpos = sanitize_for_printing(line, errptr - line, 80);
 
 				ha_alert("parsing [%s:%d]: truncated or invalid hexadecimal sequence at position %d:\n"
-					 "  %s\n  %*s\n", file, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
+					 "  %s\n  %*s\n", file->filename, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
 				err_code |= ERR_ALERT | ERR_FATAL;
 				fatal++;
 				goto next_line;
@@ -1915,7 +2006,7 @@ next_line:
 				size_t newpos = sanitize_for_printing(line, errptr - line, 80);
 
 				ha_alert("parsing [%s:%d]: truncated or invalid word expansion sequence at position %d:\n"
-					 "  %s\n  %*s\n", file, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
+					 "  %s\n  %*s\n", file->filename, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
 				err_code |= ERR_ALERT | ERR_FATAL;
 				fatal++;
 				goto next_line;
@@ -1926,7 +2017,7 @@ next_line:
 				outline = my_realloc2(outline, outlinesize);
 				if (outline == NULL) {
 					ha_alert("parsing [%s:%d]: line too long, cannot allocate memory.\n",
-						 file, linenum);
+						 file->filename, linenum);
 					err_code |= ERR_ALERT | ERR_FATAL | ERR_ABORT;
 					fatal++;
 					outlinesize = 0;
@@ -1939,7 +2030,7 @@ next_line:
 			if (err & PARSE_ERR_TOOMANY) {
 				/* only check this *after* being sure the output is allocated */
 				ha_alert("parsing [%s:%d]: too many words, truncating after word %d, position %ld: <%s>.\n",
-					 file, linenum, MAX_LINE_ARGS, (long)(args[MAX_LINE_ARGS-1] - outline + 1), args[MAX_LINE_ARGS-1]);
+					 file->filename, linenum, MAX_LINE_ARGS, (long)(args[MAX_LINE_ARGS-1] - outline + 1), args[MAX_LINE_ARGS-1]);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				fatal++;
 				goto next_line;
@@ -2238,7 +2329,7 @@ next_line:
 
 				nested_cond_lvl++;
 				if (nested_cond_lvl >= MAXNESTEDCONDS) {
-					ha_alert("parsing [%s:%d]: too many nested '.if', max is %d.\n", file, linenum, MAXNESTEDCONDS);
+					ha_alert("parsing [%s:%d]: too many nested '.if', max is %d.\n", file->filename, linenum, MAXNESTEDCONDS);
 					err_code |= ERR_ALERT | ERR_FATAL | ERR_ABORT;
 					goto err;
 				}
@@ -2258,7 +2349,7 @@ next_line:
 					size_t newpos = sanitize_for_printing(args[1], errptr - args[1], 76);
 
 					ha_alert("parsing [%s:%d]: %s in '.if' at position %d:\n  .if %s\n  %*s\n",
-						 file, linenum, errmsg,
+						 file->filename, linenum, errmsg,
 					         (int)(errptr-args[1]+1), args[1], (int)(newpos+5), "^");
 
 					free(errmsg);
@@ -2284,14 +2375,14 @@ next_line:
 					;
 
 				if (!nested_cond_lvl) {
-					ha_alert("parsing [%s:%d]: lone '.elif' with no matching '.if'.\n", file, linenum);
+					ha_alert("parsing [%s:%d]: lone '.elif' with no matching '.if'.\n", file->filename, linenum);
 					err_code |= ERR_ALERT | ERR_FATAL | ERR_ABORT;
 					goto err;
 				}
 
 				if (nested_conds[nested_cond_lvl] == NESTED_COND_ELSE_TAKE ||
 				    nested_conds[nested_cond_lvl] == NESTED_COND_ELSE_DROP) {
-					ha_alert("parsing [%s:%d]: '.elif' after '.else' is not permitted.\n", file, linenum);
+					ha_alert("parsing [%s:%d]: '.elif' after '.else' is not permitted.\n", file->filename, linenum);
 					err_code |= ERR_ALERT | ERR_FATAL | ERR_ABORT;
 					goto err;
 				}
@@ -2309,7 +2400,7 @@ next_line:
 					size_t newpos = sanitize_for_printing(args[1], errptr - args[1], 74);
 
 					ha_alert("parsing [%s:%d]: %s in '.elif' at position %d:\n  .elif %s\n  %*s\n",
-						 file, linenum, errmsg,
+						 file->filename, linenum, errmsg,
 					         (int)(errptr-args[1]+1), args[1], (int)(newpos+7), "^");
 
 					free(errmsg);
@@ -2327,20 +2418,20 @@ next_line:
 			else if (strcmp(args[0], ".else") == 0) {
 				if (*args[1]) {
 					ha_alert("parsing [%s:%d]: Unexpected argument '%s' for '%s'.\n",
-					         file, linenum, args[1], args[0]);
+					         file->filename, linenum, args[1], args[0]);
 					err_code |= ERR_ALERT | ERR_FATAL | ERR_ABORT;
 					break;
 				}
 
 				if (!nested_cond_lvl) {
-					ha_alert("parsing [%s:%d]: lone '.else' with no matching '.if'.\n", file, linenum);
+					ha_alert("parsing [%s:%d]: lone '.else' with no matching '.if'.\n", file->filename, linenum);
 					err_code |= ERR_ALERT | ERR_FATAL | ERR_ABORT;
 					goto err;
 				}
 
 				if (nested_conds[nested_cond_lvl] == NESTED_COND_ELSE_TAKE ||
 				    nested_conds[nested_cond_lvl] == NESTED_COND_ELSE_DROP) {
-					ha_alert("parsing [%s:%d]: '.else' after '.else' is not permitted.\n", file, linenum);
+					ha_alert("parsing [%s:%d]: '.else' after '.else' is not permitted.\n", file->filename, linenum);
 					err_code |= ERR_ALERT | ERR_FATAL | ERR_ABORT;
 					goto err;
 				}
@@ -2359,13 +2450,13 @@ next_line:
 			else if (strcmp(args[0], ".endif") == 0) {
 				if (*args[1]) {
 					ha_alert("parsing [%s:%d]: Unexpected argument '%s' for '%s'.\n",
-					         file, linenum, args[1], args[0]);
+					         file->filename, linenum, args[1], args[0]);
 					err_code |= ERR_ALERT | ERR_FATAL | ERR_ABORT;
 					break;
 				}
 
 				if (!nested_cond_lvl) {
-					ha_alert("parsing [%s:%d]: lone '.endif' with no matching '.if'.\n", file, linenum);
+					ha_alert("parsing [%s:%d]: lone '.endif' with no matching '.if'.\n", file->filename, linenum);
 					err_code |= ERR_ALERT | ERR_FATAL | ERR_ABORT;
 					break;
 				}
@@ -2389,51 +2480,51 @@ next_line:
 			if (strcmp(args[0], ".alert") == 0) {
 				if (*args[2]) {
 					ha_alert("parsing [%s:%d]: Unexpected argument '%s' for '%s'. Use quotes if the message should contain spaces.\n",
-					           file, linenum, args[2], args[0]);
+					           file->filename, linenum, args[2], args[0]);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto next_line;
 				}
 
-				ha_alert("parsing [%s:%d]: '%s'.\n", file, linenum, args[1]);
+				ha_alert("parsing [%s:%d]: '%s'.\n", file->filename, linenum, args[1]);
 				err_code |= ERR_ALERT | ERR_FATAL | ERR_ABORT;
 				goto err;
 			}
 			else if (strcmp(args[0], ".warning") == 0) {
 				if (*args[2]) {
 					ha_alert("parsing [%s:%d]: Unexpected argument '%s' for '%s'. Use quotes if the message should contain spaces.\n",
-					           file, linenum, args[2], args[0]);
+					           file->filename, linenum, args[2], args[0]);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto next_line;
 				}
 
-				ha_warning("parsing [%s:%d]: '%s'.\n", file, linenum, args[1]);
+				ha_warning("parsing [%s:%d]: '%s'.\n", file->filename, linenum, args[1]);
 				err_code |= ERR_WARN;
 				goto next_line;
 			}
 			else if (strcmp(args[0], ".notice") == 0) {
 				if (*args[2]) {
 					ha_alert("parsing [%s:%d]: Unexpected argument '%s' for '%s'. Use quotes if the message should contain spaces.\n",
-					         file, linenum, args[2], args[0]);
+					         file->filename, linenum, args[2], args[0]);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto next_line;
 				}
 
-				ha_notice("parsing [%s:%d]: '%s'.\n", file, linenum, args[1]);
+				ha_notice("parsing [%s:%d]: '%s'.\n", file->filename, linenum, args[1]);
 				goto next_line;
 			}
 			else if (strcmp(args[0], ".diag") == 0) {
 				if (*args[2]) {
 					ha_alert("parsing [%s:%d]: Unexpected argument '%s' for '%s'. Use quotes if the message should contain spaces.\n",
-					         file, linenum, args[2], args[0]);
+					         file->filename, linenum, args[2], args[0]);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto next_line;
 				}
 
-				ha_diag_warning("parsing [%s:%d]: '%s'.\n", file, linenum, args[1]);
+				ha_diag_warning("parsing [%s:%d]: '%s'.\n", file->filename, linenum, args[1]);
 				goto next_line;
 			}
 			else {
-				ha_alert("parsing [%s:%d]: unknown directive '%s'.\n", file, linenum, args[0]);
+				ha_alert("parsing [%s:%d]: unknown directive '%s'.\n", file->filename, linenum, args[0]);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				fatal++;
 				break;
@@ -2470,7 +2561,7 @@ next_line:
 			ha_alert("parsing [%s:%d]: negation/default currently "
 				 "supported only for options, log, busy-polling, "
 				 "set-dumpable, strict-limits, insecure-fork-wanted "
-				 "and numa-cpu-mapping.\n", file, linenum);
+				 "and numa-cpu-mapping.\n", file->filename, linenum);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			fatal++;
 		}
@@ -2488,7 +2579,7 @@ next_line:
 				cs = ics; // 
 				free(global.cfg_curr_section);
 				global.cfg_curr_section = strdup(*args[1] ? args[1] : args[0]);
-				check_section_position(args[0], file, linenum);
+				check_section_position(args[0], file->filename, linenum);
 				break;
 			}
 		}
@@ -2508,15 +2599,15 @@ next_line:
 		pcs = NULL;
 
 		if (!cs) {
-			ha_alert("parsing [%s:%d]: unknown keyword '%s' out of section.\n", file, linenum, args[0]);
+			ha_alert("parsing [%s:%d]: unknown keyword '%s' out of section.\n", file->filename, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			fatal++;
 		} else {
 			int status; //  global.mode = MODE_DISCOVERY
 			// status = cs->section_parser(file, linenum, args, kwm, global.mode);
 			ha_notice("10. >>>> line=%s, readbytes=%d, cur_section=%s\n", line, readbytes, cursection);
-			ha_notice("10. >>>> toparse: %s, linenum=%d, kwm=%d\n", file, linenum, kwm);
-			status = cs->section_parser(file, linenum, args, kwm);
+			ha_notice("10. >>>> toparse: %s, linenum=%d, kwm=%d\n", file->filename, linenum, kwm);
+			status = cs->section_parser(file->filename, linenum, args, kwm);
 			err_code |= status;
 			if (status & ERR_FATAL)
 				fatal++;
@@ -2531,7 +2622,7 @@ next_line:
 
 	if (missing_lf != -1) {
 		ha_alert("parsing [%s:%d]: Missing LF on last line, file might have been truncated at position %d.\n",
-		         file, linenum, (missing_lf + 1));
+		         file->filename, linenum, (missing_lf + 1));
 		err_code |= ERR_ALERT | ERR_FATAL;
 	}
 
@@ -2540,7 +2631,7 @@ next_line:
 		err_code |= cs->post_section_parser();
 
 	if (nested_cond_lvl) {
-		ha_alert("parsing [%s:%d]: non-terminated '.if' block.\n", file, linenum);
+		ha_alert("parsing [%s:%d]: non-terminated '.if' block.\n", file->filename, linenum);
 		err_code |= ERR_ALERT | ERR_FATAL | ERR_ABORT;
 	}
 
@@ -2556,9 +2647,6 @@ err:
 	free(outline);
 	global.cfg_curr_line = 0;
 	global.cfg_curr_file = NULL;
-
-	if (f)
-		fclose(f);
 
 	return err_code;
 }

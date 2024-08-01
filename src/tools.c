@@ -4883,39 +4883,6 @@ unsigned char utf8_next(const char *s, int len, unsigned int *c)
 	return code | ((p-(unsigned char *)s)&0x0f);
 }
 
-/* append a copy of string <filename>, pointer to some allocated memory and size of
- * this area at the end of the list <li>.
- * On failure : return 0 and <err> filled with an error message.
- * The caller is responsible for freeing the <err>, <name> str and <addr>
- * memory areas using free().
- */
-int list_append_cfgfile(struct list *li, const char *filename, char **err)
-{
-	struct cfgfile *entry = NULL;
-
-	entry = calloc(1, sizeof(*entry));
-	if (!entry) {
-		memprintf(err, "out of memory");
-		goto fail_entry;
-	}
-
-	entry->filename = strdup(name);
-	if (!entry->filename) {
-		memprintf(err, "out of memory");
-		goto fail_entry_name;
-	}
-
-	LIST_APPEND(li, &entry->list);
-
-	return 1;
-
-fail_entry_name:
-	free(entry->filename);
-fail_entry:
-	free(entry);
-	return 0;
-}
-
 /* indicates if a memory location may safely be read or not. The trick consists
  * in performing a harmless syscall using this location as an input and letting
  * the operating system report whether it's OK or not. For this we have the
@@ -6691,41 +6658,38 @@ static int init_tools_per_thread()
 	return 1;
 }
 REGISTER_PER_THREAD_INIT(init_tools_per_thread);
-//**buf => pos
-//*end - thisline + size
-//ret(thisline) = fgets_from_mem(thisline, size, **buf, *end)
-//fgets_from_mem(thisline, )
-//  (fgets(thisline + readbytes, linesize - readbytes, f) != NULL)
-//while (fgets(thisline + readbytes, linesize - readbytes, f) != NULL) {
-char *fgets_from_mem(char* buf, int size, char *position, char *end)
+
+/* read lines from arbitrary memory buffer, imitate fgets behaviour */
+char *fgets_from_mem(char* buf, int size, char **position, char *end)
 {
-	char *pos = position; /* ptr to current position in cfg->content string */
+	// *position; /* ptr to current position in cfg->content string */
 	char *new_pos;
 	int len = 0;
 
 	/* EOF */
-	if (position == end)
+	if (*position == end)
 		return NULL;
 
 	size--; /* keep fgets behaviour, reads at most one less than size */
-	new_pos = memchr(position, '\n', size);
+	new_pos = memchr(*position, '\n', size);
 	if (new_pos) {
-		len = new_pos - position;
-		memcpy(buf, position, len);
-		*(buf + len + 1)  = '\0';
-		position = new_pos;
+		/* '+1' to grab and copy '\n' at the end of line */
+		len = (new_pos + 1) - *position;
+		memcpy(buf, *position, len);
+		*(buf + len)  = '\0';
+		*position = new_pos + 1;
 
 		return buf;
 	} else {
 		/* closer to end */
-		if (position + size >= end) {
+		if (*position + size >= end) {
 			/* copy the rest of line till the end as position + size >= end
 			 * so we are not to risk of overflow the buffer
 			 */
-			len = end - position;
-			memcpy(buf, position, len);
-			*(buf + len + 1)  = '\0';
-			position = end;
+			len = end - *position;
+			memcpy(buf, *position, len);
+			*(buf + len)  = '\0';
+			*position = end;
 
 			return buf;
 			
@@ -6737,9 +6701,9 @@ char *fgets_from_mem(char* buf, int size, char *position, char *end)
 			 * again with new size a little bit of
 			 * memory from updated position to scan it with memchr
 			 */
-			memcpy(buf, position, size);
-			*(buf + size + 1)  = '\0';
-			position += size;
+			memcpy(buf, *position, size);
+			*(buf + size)  = '\0';
+			*position += size;
 			return buf;
 		}
 	}

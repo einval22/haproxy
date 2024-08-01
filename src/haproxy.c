@@ -1166,60 +1166,6 @@ next_dir_entry:
 	free(err);
 }
 
-/* Reads config files in RAM. Returns 0 on success and 1 on error, emits an
- * alert and calls deinit(), if we can't open a file, luck of memory or
- * failed to read the all filesize. deinit() assures on error path, that all
- * ressources, which might be allocated before are freed, included cfgfiles list.
- */
-static int read_cfg_in_ram(char* filename, char* cfg_content, char *progname)
-{
-	struct stat file_stat;
-
-	if ((f = fopen(cfg->filename,"r")) == NULL) {
-		ha_alert("Could not open configuration file %s : %s\n",
-				cfg->filename, strerror(errno));
-		return 1;
-	}
-
-	if (stat(cfg->filename, &file_stat) != 0) {
-		ha_alert("stat() failed for configuration file %s : %s\n",
-			 cfg->filename, strerror(errno));
-		goto exit_and_close;
-	}
-
-	cfg_content = calloc(file_stat.st_size + 1, sizeof(char));
-	if (!cfg_content) {
-		ha_alert("Not enough memory to read %s. Please, check "
-			 "'ulimit -d' or '-m' option could be set in %s"
-			 "command line\n", cfg->filename, progname);
-		goto exit_and_close;
-	}
-
-	read_bytes = fread(cfg_content, sizeof(char), file_stat.st_size, f);
-	if (read_bytes != file_stat.st_size) {
-		/* let's check what's happened before quit */
-		if (feof(f))
-			ha_alert("Unexpectedly reached EOF, while reading %s."
-				 "Please, check if it wasn't changed at the meantime"
-				 "by some other application\n.", cfg->filename);
-		else
-			ha_alert("Failed to read %s: %s", cfg->filename, strerror(errno));
-		goto free_mem;
-	}
-
-
-	fclose(f);
-
-	return read_bytes;
-
-free_mem:
-	free(cfg_content);
-exit_and_close:
-	fclose (f);
-
-	return -1;
-}
-
 /* Reads config files. Terminates process with exit(1), if we are luck of RAM,
  * couldn't open provided file(s) or parser has detected some fatal error.
  * Otherwise, returns an err_code, which may contain 0 (OK) or ERR_WARN,
@@ -1247,16 +1193,11 @@ static int read_cfg(char *progname)
 	setenv("HAPROXY_BRANCH", PRODUCT_BRANCH, 1);
 	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
 		int ret = 0;
-		int read_bytes = 0;
-		char *content = NULL;
 
-		
-		read_bytes = read_cfg_in_ram(cfg->filename, content, progname);
-		if (read_bytes < 0) {
+		cfg->size = read_cfg_in_ram(cfg->filename, &cfg->content);
+		if (cfg->size < 0) {
 			goto exit;	
 		}
-		cfg->content = content;
-		cfg->size = read_bytes;
 
 		if (!memprintf(&env_cfgfiles, "%s%s%s",	(env_cfgfiles ? env_cfgfiles : ""), (env_cfgfiles ? ";" : ""), cfg->filename)) {
 			/* free what we've already allocated and free cfglist */
@@ -1292,7 +1233,7 @@ static int read_cfg(char *progname)
 
 	return err_code;
 
-goto exit:
+exit:
 	if (env_cfgfiles)
 		free(env_cfgfiles);
 	/* cfglist will be freed in deinit() part */
@@ -2109,7 +2050,6 @@ static void init(int argc, char **argv)
 
 	/* in wait mode, we don't try to read the configuration files */
 	if (!(global.mode & MODE_MWORKER_WAIT)) {
-		read_cfg_in_ram(progname);
 		read_cfg(progname);
 	}
 		
@@ -2689,7 +2629,7 @@ static void init(int argc, char **argv)
 void deinit(void)
 {
 	struct proxy *p = proxies_list, *p0;
-	struct ram_filelist *cfg, *tmp_cfg;
+	struct cfgfile *cfg, *tmp_cfg;
 	struct uri_auth *uap, *ua = NULL;
 	struct logger *log, *logb;
 	struct build_opts_str *bol, *bolb;
@@ -2827,10 +2767,8 @@ void deinit(void)
 	}
 
 	list_for_each_entry_safe(cfg, tmp_cfg, &cfg_cfgfiles, list) {
-		if (cfg->addr)
-			free(cfg->addr);
-		if (cfg->name)
-			free(cfg->name);
+		free(cfg->content);
+		free(cfg->filename);
 		LIST_DELETE(&cfg->list);
 		free(cfg);
 	}

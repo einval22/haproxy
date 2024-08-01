@@ -95,8 +95,8 @@ struct cfgfile {
 	struct list list;
 	char *filename; /* config file name */
 	char *content; /* allocated str with config file content */
-	size_t size; /* size of stored file */
-}
+	int size; /* size of stored file */
+};
 
 extern struct list postparsers;
 extern int cfg_maxpconn;
@@ -140,6 +140,8 @@ const char *cfg_find_best_match(const char *word, const struct list *list, int s
 int warnifnotcap(struct proxy *proxy, int cap, const char *file, int line, const char *arg, const char *hint);
 int failifnotcap(struct proxy *proxy, int cap, const char *file, int line, const char *arg, const char *hint);
 void cfg_dump_registered_keywords();
+int list_append_cfgfile(struct list *li, const char *filename, char **err);
+int read_cfg_in_ram(char* filename, char** cfg_content);
 
 /* simplified way to define a section parser */
 #define REGISTER_CONFIG_SECTION(name, parse, post)                            \

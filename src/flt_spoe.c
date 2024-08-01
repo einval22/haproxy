@@ -2199,12 +2199,11 @@ static int parse_spoe_flt(char **args, int *cur_arg, struct proxy *px,
 	struct spoe_group           *grp, *grpback;
 	struct spoe_placeholder     *ph, *phback;
 	struct spoe_var_placeholder *vph, *vphback;
-	struct cfgfile		    *cfg_file = {0};
+	struct cfgfile		    cfg_file = {0};
 	struct logger               *logger, *loggerback;
 	char                        *file = NULL, *engine = NULL;
 	int                          ret, pos = *cur_arg + 1;
 	int 			     read_bytes = 0;
-	char 			    *cfg_content = NULL;
 
 	LIST_INIT(&curmsgs);
 	LIST_INIT(&curgrps);
@@ -2264,16 +2263,15 @@ static int parse_spoe_flt(char **args, int *cur_arg, struct proxy *px,
 	curagent  = NULL;
 	curmsg    = NULL;
 
-	/* read content of SPOE config in RAM as readcfgfile reads now the content
-	 * of config files stored as chunks in .heap
+	/* load the content of SPOE config file from cfg_file.filename into some
+	 * area in .heap. readcfgfile() now parses the content of config files
+	 * stored in RAM as separate chunks (see struct cfgfile in cfgparse.h),
+	 * these chunks chained in cfg_cfgfiles global list.
 	 */
-	read_bytes = read_cfg_in_ram(cfg_file->filename, content, progname);
-	if (read_bytes = load_cfg_in_ram(cfg, progname) < 0) {
+	cfg_file.size = read_cfg_in_ram(cfg_file.filename, &cfg_file->content);
+	if (cfg_file.size < 0) {
 		goto error;	
 	}
-	cfg_file.content = content;
-	cfg_file.size = read_bytes;
-	
 	ret = readcfgfile(&cfg_file);
 
 	/* unregister SPOE sections and restore previous sections */
