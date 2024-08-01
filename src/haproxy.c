@@ -1234,8 +1234,7 @@ static int read_cfg(char *progname)
 	return err_code;
 
 exit:
-	if (env_cfgfiles)
-		free(env_cfgfiles);
+	free(env_cfgfiles);
 	/* cfglist will be freed in deinit() part */
 	deinit_and_exit(1);
 }

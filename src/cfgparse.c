@@ -1763,7 +1763,7 @@ int read_cfg_in_ram(char* filename, char** cfg_content)
 	if ((f = fopen(filename,"r")) == NULL) {
 		ha_alert("Could not open configuration file %s : %s\n",
 				filename, strerror(errno));
-		return 1;
+		return -1;
 	}
 
 	if (stat(filename, &file_stat) != 0) {
@@ -1797,7 +1797,7 @@ int read_cfg_in_ram(char* filename, char** cfg_content)
 	return read_bytes;
 
 free_mem:
-	free(*cfg_content);
+	ha_free(cfg_content);
 exit_and_close:
 	fclose(f);
 
@@ -1819,7 +1819,6 @@ int readcfgfile(const struct cfgfile *file)
 {
 	char *thisline = NULL;
 	int linesize = LINESIZE;
-	//FILE *f = NULL;
 	int linenum = 0;
 	int err_code = 0;
 	struct cfg_section *cs = NULL, *pcs = NULL;

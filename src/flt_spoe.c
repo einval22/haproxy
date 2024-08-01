@@ -2527,6 +2527,8 @@ static int parse_spoe_flt(char **args, int *cur_arg, struct proxy *px,
 	}
 
  finish:
+	// TODO:
+	free(cfg_file.content);
 	/* move curmsgs to the agent message list */
 	curmsgs.n->p = &curagent->messages;
 	curmsgs.p->n = &curagent->messages;
