@@ -1235,8 +1235,15 @@ static int read_cfg(char *progname)
 
 exit:
 	free(env_cfgfiles);
-	/* cfglist will be freed in deinit() part */
-	deinit_and_exit(1);
+	/* free cfg_cfgfiles list */
+	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
+		ha_free(&cfg->content);
+		ha_free(&cfg->filename);
+		LIST_DELETE(&cfg->list);
+		ha_free(&cfg);
+	}
+
+	exit(1);
 }
 
 /*
@@ -2628,7 +2635,7 @@ static void init(int argc, char **argv)
 void deinit(void)
 {
 	struct proxy *p = proxies_list, *p0;
-	struct cfgfile *cfg, *tmp_cfg;
+	struct cfgfile *cfg, *cfg_tmp;
 	struct uri_auth *uap, *ua = NULL;
 	struct logger *log, *logb;
 	struct build_opts_str *bol, *bolb;
@@ -2765,11 +2772,11 @@ void deinit(void)
 		free_logger(log);
 	}
 
-	list_for_each_entry_safe(cfg, tmp_cfg, &cfg_cfgfiles, list) {
-		free(cfg->content);
-		free(cfg->filename);
+	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
+		ha_free(&cfg->content);
+		ha_free(&cfg->filename);
 		LIST_DELETE(&cfg->list);
-		free(cfg);
+		ha_free(&cfg);
 	}
 
 	list_for_each_entry_safe(bol, bolb, &build_opts_list, list) {
