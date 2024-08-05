@@ -1827,7 +1827,7 @@ free_mem:
  * Only the two first ones can stop processing, the two others are just
  * indicators.
  */
-int readcfgfile(const struct cfgfile *file)
+int parse_cfg(const struct cfgfile *file)
 {
 	char *thisline = NULL;
 	int linesize = LINESIZE;
