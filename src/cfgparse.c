@@ -1751,6 +1751,59 @@ fail_entry:
 	return 0;
 }
 
+/* loads the content of the given file in .heap. On success, returns the number
+ * of bytes successfully stored at *cfg_content until EOF. On error, emits
+ * alerts, performs needed clean-up routines and returns -1.
+ */
+int load_cfg_in_mem(char* filename, char** cfg_content)
+{
+	FILE *f;
+	char *new_area;
+	int read_bytes = 0;
+	int ret = 0;
+	int chunk_size = LINESIZE;
+	int bytes_to_read;
+
+	if ((f = fopen(filename,"r")) == NULL) {
+		ha_alert("Could not open configuration file %s : %s\n",
+			 filename, strerror(errno));
+		return -1;
+	}
+
+	*cfg_content = malloc(chunk_size * sizeof(char));
+	bytes_to_read = chunk_size;
+
+	while((ret = fread(*cfg_content + read_bytes, sizeof(char), bytes_to_read, f))) {
+		read_bytes +=ret;
+
+		/* all bytes have been read */
+		if ((ret <= bytes_to_read) && (feof(f) || ferror(f)))
+			break;
+
+		/* there is still some data, so grab more next time */
+		chunk_size *= 2;
+		new_area  = realloc(*cfg_content, chunk_size * sizeof(char));
+		if (new_area == NULL) {
+			ha_alert("Loading %s: file too long, cannot allocate memory.\n",
+				 filename);
+			goto free_mem;
+		}
+		*cfg_content = new_area;
+
+		bytes_to_read = chunk_size - read_bytes;
+	}
+
+	fclose(f);
+
+	return read_bytes;
+
+free_mem:
+	ha_free(cfg_content);
+	fclose(f);
+
+	return -1;
+}
+
 /*
  * This function reads and parses the configuration file given in the argument.
  * Returns the error code, 0 if OK, -1 if the config file couldn't be opened,
