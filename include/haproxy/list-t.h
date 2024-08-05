@@ -70,4 +70,12 @@ struct cond_wordlist {
 	char *s;
 };
 
+/* store in memory config files meta data and content */
+struct cfgfile {
+	struct list list;
+	char *filename;                         /* config file name */
+	char *content;                          /* allocated str with config file content */
+	int size;                               /* size of stored file */
+};
+
 #endif /* _HAPROXY_LIST_T_H */
