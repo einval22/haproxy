@@ -1174,7 +1174,7 @@ next_dir_entry:
 static int read_cfg(char *progname)
 {
 	char *env_cfgfiles = NULL;
-	struct cfgfile *cfg;
+	struct cfgfile *cfg, *cfg_tmp;
 	int err_code = 0;
 
 	/* handle cfgfiles that are actually directories */
@@ -1191,8 +1191,12 @@ static int read_cfg(char *progname)
 	setenv("HAPROXY_HTTPS_LOG_FMT", default_https_log_format, 1);
 	setenv("HAPROXY_TCP_LOG_FMT", default_tcp_log_format, 1);
 	setenv("HAPROXY_BRANCH", PRODUCT_BRANCH, 1);
-	list_for_each_entry(cfg, &cfg_cfgfiles, list) {
+	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
 		int ret;
+
+		cfg->size = load_cfg_in_mem(cfg->filename, &cfg->content);
+		if (cfg->size < 0)
+			goto err;
 
 		if (!memprintf(&env_cfgfiles, "%s%s%s",
 			       (env_cfgfiles ? env_cfgfiles : ""),
@@ -1202,7 +1206,7 @@ static int read_cfg(char *progname)
 			goto err;
 		}
 
-		ret = readcfgfile(cfg->filename);
+		ret = readcfgfile(cfg);
 		if (ret == -1) {
 			ha_alert("Could not open configuration file %s : %s\n",
 				 cfg->filename, strerror(errno));
@@ -1975,6 +1979,7 @@ static void init(int argc, char **argv)
 	struct proxy *px;
 	struct post_check_fct *pcf;
 	struct pre_check_fct *prcf;
+	struct cfgfile *cfg, *cfg_tmp;
 	int ideal_maxconn;
 	const char *cc, *cflags, *opts;
 
@@ -2046,6 +2051,14 @@ static void init(int argc, char **argv)
 	/* in wait mode, we don't try to read the configuration files */
 	if (!(global.mode & MODE_MWORKER_WAIT)) {
 		ret = read_cfg(progname);
+		/* pasring is finished, free the memory used to store configs
+		 * content. */
+		list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
+			ha_free(&cfg->content);
+			ha_free(&cfg->filename);
+			LIST_DELETE(&cfg->list);
+			ha_free(&cfg);
+		}
 		if (ret < 0)
 			exit(1);
 	}
@@ -2625,7 +2638,6 @@ static void init(int argc, char **argv)
 void deinit(void)
 {
 	struct proxy *p = proxies_list, *p0;
-	struct cfgfile *cfg, *cfg_tmp;
 	struct uri_auth *uap, *ua = NULL;
 	struct logger *log, *logb;
 	struct build_opts_str *bol, *bolb;
@@ -2760,13 +2772,6 @@ void deinit(void)
 	list_for_each_entry_safe(log, logb, &global.loggers, list) {
 		LIST_DEL_INIT(&log->list);
 		free_logger(log);
-	}
-
-	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
-		ha_free(&cfg->content);
-		ha_free(&cfg->filename);
-		LIST_DELETE(&cfg->list);
-		ha_free(&cfg);
 	}
 
 	list_for_each_entry_safe(bol, bolb, &build_opts_list, list) {
