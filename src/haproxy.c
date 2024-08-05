@@ -1206,7 +1206,7 @@ static int read_cfg(char *progname)
 			goto err;
 		}
 
-		ret = readcfgfile(cfg);
+		ret = parse_cfg(cfg);
 		if (ret == -1) {
 			ha_alert("Could not open configuration file %s : %s\n",
 				 cfg->filename, strerror(errno));
