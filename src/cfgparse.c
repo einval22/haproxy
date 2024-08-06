@@ -1757,12 +1757,24 @@ fail_entry:
  */
 int load_cfg_in_mem(char* filename, char** cfg_content)
 {
+	struct stat file_stat;
 	FILE *f;
 	char *new_area;
 	int read_bytes = 0;
 	int ret = 0;
 	int chunk_size = LINESIZE;
 	int bytes_to_read;
+
+	/* let's try to obtain the size, if regular file */
+	if (stat(filename, &file_stat) != 0) {
+		ha_alert("stat() failed for configuration file %s : %s\n",
+			 filename, strerror(errno));
+		return -1;
+	}
+
+	if (file_stat.st_size)
+		/* as we need to read EOF to have feof(f)=1 */
+		chunk_size = file_stat.st_size + 1;
 
 	if ((f = fopen(filename,"r")) == NULL) {
 		ha_alert("Could not open configuration file %s : %s\n",
