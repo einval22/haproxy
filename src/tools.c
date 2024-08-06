@@ -4883,39 +4883,6 @@ unsigned char utf8_next(const char *s, int len, unsigned int *c)
 	return code | ((p-(unsigned char *)s)&0x0f);
 }
 
-/* append a copy of string <filename>, ptr to some allocated memory at the at
- * the end of the list <li>.
- * On failure : return 0 and <err> filled with an error message.
- * The caller is responsible for freeing the <err> and <filename> copy
- * memory area using free().
- */
-int list_append_cfgfile(struct list *li, const char *filename, char **err)
-{
-	struct cfgfile *entry = NULL;
-
-	entry = calloc(1, sizeof(*entry));
-	if (!entry) {
-		memprintf(err, "out of memory");
-		goto fail_entry;
-	}
-
-	entry->filename = strdup(filename);
-	if (!entry->filename) {
-		memprintf(err, "out of memory");
-		goto fail_entry_name;
-	}
-
-	LIST_APPEND(li, &entry->list);
-
-	return 1;
-
-fail_entry_name:
-	free(entry->filename);
-fail_entry:
-	free(entry);
-	return 0;
-}
-
 /* indicates if a memory location may safely be read or not. The trick consists
  * in performing a harmless syscall using this location as an input and letting
  * the operating system report whether it's OK or not. For this we have the
