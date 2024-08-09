@@ -65,7 +65,7 @@ static const char *common_kw_list[] = {
  * Only the two first ones can stop processing, the two others are just
  * indicators.
  */
-int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
+int cfg_parse_global(const char *file, int linenum, char **args, int kwm, int mode)
 {
 	int err_code = 0;
 	char *errmsg = NULL;
@@ -1381,6 +1381,10 @@ static int cfg_parse_global_master_worker(char **args, int section_type,
 					  struct proxy *curpx, const struct proxy *defpx,
 					  const char *file, int line, char **err)
 {
+
+	if (!(mode & MODE_DISCOVERY))
+		return 0;
+
 	if (too_many_args(1, args, err, NULL))
 		return -1;
 
@@ -1401,8 +1405,12 @@ static int cfg_parse_global_master_worker(char **args, int section_type,
 /* Parser for other modes */
 static int cfg_parse_global_mode(char **args, int section_type,
 				 struct proxy *curpx, const struct proxy *defpx,
-				 const char *file, int line, char **err)
+				 const char *file, int line, char **err, int mode)
 {
+	if (!(mode & MODE_DISCOVERY))
+		return 0;
+
+
 	if (too_many_args(0, args, err, NULL))
 		return -1;
 
@@ -1426,8 +1434,11 @@ static int cfg_parse_global_mode(char **args, int section_type,
 /* Disable certain poller if set */
 static int cfg_parse_global_disable_poller(char **args, int section_type,
 					   struct proxy *curpx, const struct proxy *defpx,
-					   const char *file, int line, char **err)
+					   const char *file, int line, char **err, mode)
 {
+	if (!(mode & MODE_DISCOVERY))
+		return 0;
+
 	if (too_many_args(0, args, err, NULL))
 		return -1;
 
@@ -1455,10 +1466,10 @@ static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_GLOBAL, "prealloc-fd", cfg_parse_prealloc_fd },
 	{ CFG_GLOBAL, "harden.reject-privileged-ports.tcp",  cfg_parse_reject_privileged_ports },
 	{ CFG_GLOBAL, "harden.reject-privileged-ports.quic", cfg_parse_reject_privileged_ports },
-	{ CFG_GLOBAL, "master-worker", cfg_parse_global_master_worker },
-	{ CFG_GLOBAL, "daemon", cfg_parse_global_mode } ,
-	{ CFG_GLOBAL, "quiet", cfg_parse_global_mode },
-	{ CFG_GLOBAL, "zero-warning", cfg_parse_global_mode },
+	{ CFG_GLOBAL, "master-worker", cfg_parse_global_master_worker, KWF_DISCOVERY },
+	{ CFG_GLOBAL, "daemon", cfg_parse_global_mode, KWF_DISCOVERY } ,
+	{ CFG_GLOBAL, "quiet", cfg_parse_global_mode, KWF_DISCOVERY },
+	{ CFG_GLOBAL, "zero-warning", cfg_parse_global_mode, KWF_DISCOVERY },
 	{ CFG_GLOBAL, "noepoll", cfg_parse_global_disable_poller },
 	{ CFG_GLOBAL, "nokqueue", cfg_parse_global_disable_poller },
 	{ CFG_GLOBAL, "noevports", cfg_parse_global_disable_poller },
