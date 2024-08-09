@@ -1968,7 +1968,6 @@ static void init(int argc, char **argv)
 {
 	char *progname = global.log_tag.area;
 	int err_code = 0;
-	int ret = 0;
 	struct proxy *px;
 	struct post_check_fct *pcf;
 	struct pre_check_fct *prcf;
