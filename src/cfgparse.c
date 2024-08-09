@@ -1832,7 +1832,7 @@ free_mem:
  * Only the two first ones can stop processing, the two others are just
  * indicators.
  */
-int parse_cfg(const struct cfgfile *cfg)
+int parse_cfg(const struct cfgfile *cfg, int mode)
 {
 	char *thisline = NULL;
 	int linesize = LINESIZE;
@@ -2582,13 +2582,22 @@ next_line:
 		} else {
 			int status;
 
-			status = cs->section_parser(file, linenum, args, kwm);
+			status = cs->section_parser(file, linenum, args, kwm, mode);
 			err_code |= status;
 			if (status & ERR_FATAL)
 				fatal++;
 
 			if (err_code & ERR_ABORT)
 				goto err;
+
+			if ((strcmp(cursection), 'global') == 0)
+				global_section_parsed = 1;
+
+		}
+
+		// TODO: to check conditions
+		if (((strcmp(cursection), 'global') !=0) && (global.mode & MODE_DISCOVERY) && global_section_parsed) {
+			break;
 		}
 	}
 
