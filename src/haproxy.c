@@ -1532,7 +1532,7 @@ static void init_early(int argc, char **argv)
 	global.argv = argv;
 	global.maxsock = 10; /* reserve 10 fds ; will be incremented by socket eaters */
 	global.rlimit_memmax_all = HAPROXY_MEMMAX;
-	global.mode = MODE_STARTING;
+	global.mode = (MODE_STARTING | MODE_DISCOVERY);
 
 	/* if we were in mworker mode, we should restart in mworker mode */
 	if (getenv("HAPROXY_MWORKER_REEXEC") != NULL)
