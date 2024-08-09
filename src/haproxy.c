@@ -1199,7 +1199,7 @@ err:
  * Otherwise, returns an err_code, which may contain 0 (OK) or ERR_WARN,
  * ERR_ALERT. It is used in further initialization stages.
  */
-static int read_cfg(char *progname)
+static int read_cfg(char *progname, int mode)
 {
 	struct cfgfile *cfg;
 	int err_code = 0;
@@ -1215,7 +1215,7 @@ static int read_cfg(char *progname)
 	list_for_each_entry(cfg, &cfg_cfgfiles, list) {
 		int ret;
 
-		ret = parse_cfg(cfg);
+		ret = parse_cfg(cfg, mode);
 		if (ret == -1)
 			return -1;
 
@@ -2042,7 +2042,7 @@ static void init(int argc, char **argv)
 	if (ret < 0)
 		exit(1);
 
-	ret = read_cfg(progname)
+	ret = read_cfg(progname, global.mode);
 
 	
 	
