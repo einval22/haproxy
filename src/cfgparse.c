@@ -110,6 +110,7 @@ int cfg_maxpconn = 0;                   /* # of simultaneous connections per pro
 int cfg_maxconn = 0;			/* # of simultaneous connections, (-n) */
 char *cfg_scope = NULL;                 /* the current scope during the configuration parsing */
 int non_global_section_parsed = 0;
+int global_section_parsed = 0;
 
 /* how to handle default paths */
 static enum default_path_mode {
@@ -2583,13 +2584,13 @@ next_line:
 			if (err_code & ERR_ABORT)
 				goto err;
 
-			if ((strcmp(cursection), 'global') == 0)
+			if (strcmp(cursection, "global") == 0)
 				global_section_parsed = 1;
 
 		}
 
 		// TODO: to check conditions
-		if (((strcmp(cursection), 'global') !=0) && (global.mode & MODE_DISCOVERY) && global_section_parsed) {
+		if ((strcmp(cursection, "global") != 0) && (global.mode & MODE_DISCOVERY) && global_section_parsed) {
 			break;
 		}
 	}

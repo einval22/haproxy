@@ -2035,20 +2035,19 @@ static void init(int argc, char **argv)
 	usermsgs_clr("config");
 
 	/* load configs in memory */
+
 	ret = load_cfg(progname);
-	/* free memory to store config file content */
+	if (ret == 0) {
+		/* read only global section in discovery mode */
+		ret = read_cfg(progname);
+	} 
 	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list)
 		ha_free(&cfg->content);
 	if (ret < 0)
 		exit(1);
 
-	/* read only global section in discovery mode */
-	ret = read_cfg(progname);
-	global.mode ~= MODE_DISCOVERY;
-	global.mode;
-
 	
-	
+	global.mode &= ~MODE_DISCOVERY;
 
 	if (!LIST_ISEMPTY(&mworker_cli_conf) && !(arg_mode & MODE_MWORKER)) {
 		ha_alert("a master CLI socket was defined, but master-worker mode (-W) is not enabled.\n");
@@ -2153,8 +2152,7 @@ static void init(int argc, char **argv)
 			/* This one must not be exported, it's internal! */
 			unsetenv("HAPROXY_MWORKER_REEXEC");
 			ha_random_jump96(1);
-			/* worker reads the config */
-			ret = read_cfg(progname);
+			
 
 			break;
 		default:
@@ -2187,6 +2185,10 @@ static void init(int argc, char **argv)
 			mworker_create_master_cli();
 		}
 	}
+
+	/* worker, daemon, foreground mode reads the rest of the config */
+	if (!(global.mode & MODE_MWORKER))
+		ret = read_cfg(progname);
 
 	/* destroy unreferenced defaults proxies  */
 	proxy_destroy_all_unref_defaults();
