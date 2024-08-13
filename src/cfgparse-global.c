@@ -65,7 +65,7 @@ static const char *common_kw_list[] = {
  * Only the two first ones can stop processing, the two others are just
  * indicators.
  */
-int cfg_parse_global(const char *file, int linenum, char **args, int kwm, int mode)
+int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 {
 	int err_code = 0;
 	char *errmsg = NULL;
@@ -1382,7 +1382,7 @@ static int cfg_parse_global_master_worker(char **args, int section_type,
 					  const char *file, int line, char **err)
 {
 
-	if (!(mode & MODE_DISCOVERY))
+	if (!(global.mode & MODE_DISCOVERY))
 		return 0;
 
 	if (too_many_args(1, args, err, NULL))
@@ -1405,9 +1405,9 @@ static int cfg_parse_global_master_worker(char **args, int section_type,
 /* Parser for other modes */
 static int cfg_parse_global_mode(char **args, int section_type,
 				 struct proxy *curpx, const struct proxy *defpx,
-				 const char *file, int line, char **err, int mode)
+				 const char *file, int line, char **err)
 {
-	if (!(mode & MODE_DISCOVERY))
+	if (!(global.mode & MODE_DISCOVERY))
 		return 0;
 
 
@@ -1434,9 +1434,9 @@ static int cfg_parse_global_mode(char **args, int section_type,
 /* Disable certain poller if set */
 static int cfg_parse_global_disable_poller(char **args, int section_type,
 					   struct proxy *curpx, const struct proxy *defpx,
-					   const char *file, int line, char **err, mode)
+					   const char *file, int line, char **err)
 {
-	if (!(mode & MODE_DISCOVERY))
+	if (!(global.mode & MODE_DISCOVERY))
 		return 0;
 
 	if (too_many_args(0, args, err, NULL))
@@ -1470,10 +1470,10 @@ static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_GLOBAL, "daemon", cfg_parse_global_mode, KWF_DISCOVERY } ,
 	{ CFG_GLOBAL, "quiet", cfg_parse_global_mode, KWF_DISCOVERY },
 	{ CFG_GLOBAL, "zero-warning", cfg_parse_global_mode, KWF_DISCOVERY },
-	{ CFG_GLOBAL, "noepoll", cfg_parse_global_disable_poller },
-	{ CFG_GLOBAL, "nokqueue", cfg_parse_global_disable_poller },
-	{ CFG_GLOBAL, "noevports", cfg_parse_global_disable_poller },
-	{ CFG_GLOBAL, "nopoll", cfg_parse_global_disable_poller },
+	{ CFG_GLOBAL, "noepoll", cfg_parse_global_disable_poller, KWF_DISCOVERY  },
+	{ CFG_GLOBAL, "nokqueue", cfg_parse_global_disable_poller, KWF_DISCOVERY},
+	{ CFG_GLOBAL, "noevports", cfg_parse_global_disable_poller, KWF_DISCOVERY },
+	{ CFG_GLOBAL, "nopoll", cfg_parse_global_disable_poller, KWF_DISCOVERY },
 	{ 0, NULL, NULL },
 }};
 

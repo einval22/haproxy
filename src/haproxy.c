@@ -1199,7 +1199,7 @@ err:
  * Otherwise, returns an err_code, which may contain 0 (OK) or ERR_WARN,
  * ERR_ALERT. It is used in further initialization stages.
  */
-static int read_cfg(char *progname, int mode)
+static int read_cfg(char *progname)
 {
 	struct cfgfile *cfg;
 	int err_code = 0;
@@ -1215,7 +1215,7 @@ static int read_cfg(char *progname, int mode)
 	list_for_each_entry(cfg, &cfg_cfgfiles, list) {
 		int ret;
 
-		ret = parse_cfg(cfg, mode);
+		ret = parse_cfg(cfg);
 		if (ret == -1)
 			return -1;
 
@@ -2034,7 +2034,7 @@ static void init(int argc, char **argv)
 
 	usermsgs_clr("config");
 
-	/*load configs and read only mode keywords and program sections in DISCOVERY MODE */
+	/* load configs in memory */
 	ret = load_cfg(progname);
 	/* free memory to store config file content */
 	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list)
@@ -2043,8 +2043,9 @@ static void init(int argc, char **argv)
 		exit(1);
 
 	/* read only global section in discovery mode */
-	ret = read_cfg(progname, global.mode);
+	ret = read_cfg(progname);
 	global.mode ~= MODE_DISCOVERY;
+	global.mode;
 
 	
 	
@@ -2153,7 +2154,7 @@ static void init(int argc, char **argv)
 			unsetenv("HAPROXY_MWORKER_REEXEC");
 			ha_random_jump96(1);
 			/* worker reads the config */
-			read_cfg(progname);
+			ret = read_cfg(progname);
 
 			break;
 		default:

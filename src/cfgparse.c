@@ -1825,7 +1825,7 @@ free_mem:
  * Only the two first ones can stop processing, the two others are just
  * indicators.
  */
-int parse_cfg(const struct cfgfile *cfg, int mode)
+int parse_cfg(const struct cfgfile *cfg)
 {
 	char *thisline = NULL;
 	int linesize = LINESIZE;
@@ -2575,7 +2575,7 @@ next_line:
 		} else {
 			int status;
 
-			status = cs->section_parser(file, linenum, args, kwm, mode);
+			status = cs->section_parser(file, linenum, args, kwm);
 			err_code |= status;
 			if (status & ERR_FATAL)
 				fatal++;
