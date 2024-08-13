@@ -2042,7 +2042,9 @@ static void init(int argc, char **argv)
 	if (ret < 0)
 		exit(1);
 
+	/* read only global section in discovery mode */
 	ret = read_cfg(progname, global.mode);
+	global.mode ~= MODE_DISCOVERY;
 
 	
 	
