@@ -2559,6 +2559,9 @@ next_line:
 		if (pcs && pcs->post_section_parser) {
 			int status;
 
+			if (global.mode & MODE_DISCOVERY)
+				continue;
+
 			status = pcs->post_section_parser();
 			err_code |= status;
 			if (status & ERR_FATAL)
@@ -2575,6 +2578,9 @@ next_line:
 			fatal++;
 		} else {
 			int status;
+			
+			if ((global.mode & MODE_DISCOVERY) && (strcmp(cs->section_name, "global") != 0))
+				continue;
 
 			status = cs->section_parser(file, linenum, args, kwm);
 			err_code |= status;
@@ -2584,15 +2590,8 @@ next_line:
 			if (err_code & ERR_ABORT)
 				goto err;
 
-			if (strcmp(cursection, "global") == 0)
-				global_section_parsed = 1;
-
 		}
 
-		// TODO: to check conditions
-		if ((strcmp(cursection, "global") != 0) && (global.mode & MODE_DISCOVERY) && global_section_parsed) {
-			break;
-		}
 	}
 
 	if (missing_lf != -1) {

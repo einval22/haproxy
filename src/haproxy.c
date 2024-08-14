@@ -2041,10 +2041,13 @@ static void init(int argc, char **argv)
 		/* read only global section in discovery mode */
 		ret = read_cfg(progname);
 	} 
-	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list)
-		ha_free(&cfg->content);
-	if (ret < 0)
+	if (ret < 0) {
+		list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
+			ha_free(&cfg->content);
+			ha_free(&cfg->filename);
+		}
 		exit(1);
+	}
 
 	
 	global.mode &= ~MODE_DISCOVERY;
@@ -2187,8 +2190,18 @@ static void init(int argc, char **argv)
 	}
 
 	/* worker, daemon, foreground mode reads the rest of the config */
-	if (!(global.mode & MODE_MWORKER))
-		ret = read_cfg(progname);
+	if (!(global.mode & MODE_MWORKER)) {
+		if (read_cfg(progname) < 0) {
+			list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
+				ha_free(&cfg->content);
+				ha_free(&cfg->filename);
+			}
+			exit(1);
+		}
+		/* all sections have been parsed */
+		list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list)
+			ha_free(&cfg->content);
+	}
 
 	/* destroy unreferenced defaults proxies  */
 	proxy_destroy_all_unref_defaults();

@@ -70,17 +70,17 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	int err_code = 0;
 	char *errmsg = NULL;
 
+	
+
 	if (strcmp(args[0], "global") == 0) {  /* new section */
 		/* no option, nothing special to do */
 		alertif_too_many_args(0, file, linenum, args, &err_code);
 		goto out;
 	}
-	else if (strcmp(args[0], "expose-deprecated-directives") == 0) {
-		deprecated_directives_allowed = 1;
-	}
-	else if (strcmp(args[0], "expose-experimental-directives") == 0) {
-		experimental_directives_allowed = 1;
-	}
+
+	if (!global.mode & MODE_DISCOVERY)
+		goto discovery;
+
 	else if (strcmp(args[0], "limited-quic") == 0) {
 		if (alertif_too_many_args(0, file, linenum, args, &err_code))
 			goto out;
@@ -92,14 +92,6 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			goto out;
 
 		global.tune.options |= GTUNE_NO_QUIC;
-	}
-	else if (strcmp(args[0], "busy-polling") == 0) { /* "no busy-polling" or "busy-polling" */
-		if (alertif_too_many_args(0, file, linenum, args, &err_code))
-			goto out;
-		if (kwm == KWM_NO)
-			global.tune.options &= ~GTUNE_BUSY_POLLING;
-		else
-			global.tune.options |=  GTUNE_BUSY_POLLING;
 	}
 	else if (strcmp(args[0], "set-dumpable") == 0) { /* "no set-dumpable" or "set-dumpable" */
 		if (alertif_too_many_args(0, file, linenum, args, &err_code))
@@ -1271,6 +1263,8 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 	}
 	else {
+
+discovery:
 		struct cfg_kw_list *kwl;
 		const char *best;
 		int index;
@@ -1281,6 +1275,11 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 				if (kwl->kw[index].section != CFG_GLOBAL)
 					continue;
 				if (strcmp(kwl->kw[index].kw, args[0]) == 0) {
+
+					/* in MODE_DISCOVERY we read only the kw, which contains the appropiate flag */
+					if ((global.mode & MODE_DISCOVERY) && ((kwl->kw[index].flags & KWF_DISCOVERY) == 0 ))
+						goto out;
+
 					if (check_kw_experimental(&kwl->kw[index], file, linenum, &errmsg)) {
 						ha_alert("%s\n", errmsg);
 						err_code |= ERR_ALERT | ERR_FATAL;
@@ -1462,11 +1461,53 @@ static int cfg_parse_global_disable_poller(char **args, int section_type,
 	return 0;
 }
 
+static int cfg_parse_global_non_std_directives(char **args, int section_type,
+					   struct proxy *curpx, const struct proxy *defpx,
+					   const char *file, int line, char **err)
+{
+
+	if (too_many_args(0, args, err, NULL))
+		return -1;
+
+	if (strcmp(args[0], "expose-deprecated-directives") == 0) {
+		deprecated_directives_allowed = 1;
+	} else  if (strcmp(args[0], "expose-experimental-directives") == 0) {
+		experimental_directives_allowed = 1;
+	} else {
+		BUG_ON(1, "Triggered in cfg_parse_global_non_std_directives() by unsupported keyword.\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int cfg_parse_global_pidfile()
+{
+	if (too_many_args(1, args, err, NULL))
+		return -1;
+	
+	if (strcmp(args[0], "pidfile") == 0) {
+		if (global.pidfile != NULL) {
+			ha_alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT;
+			return err_code;
+		}
+		if (*(args[1]) == 0) {
+			ha_alert("parsing [%s:%d] : '%s' expects a file name as an argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			return -1;
+		}
+		global.pidfile = strdup(args[1]);
+	}
+
+	return 0;
+}
+
 static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_GLOBAL, "prealloc-fd", cfg_parse_prealloc_fd },
 	{ CFG_GLOBAL, "harden.reject-privileged-ports.tcp",  cfg_parse_reject_privileged_ports },
 	{ CFG_GLOBAL, "harden.reject-privileged-ports.quic", cfg_parse_reject_privileged_ports },
-	{ CFG_GLOBAL, "master-worker", cfg_parse_global_master_worker, KWF_DISCOVERY },
+	{ CFG_GLOBAL, "master-worker", cfg_parse_global_master_worker, KWF_DISCOVERY},
 	{ CFG_GLOBAL, "daemon", cfg_parse_global_mode, KWF_DISCOVERY } ,
 	{ CFG_GLOBAL, "quiet", cfg_parse_global_mode, KWF_DISCOVERY },
 	{ CFG_GLOBAL, "zero-warning", cfg_parse_global_mode, KWF_DISCOVERY },
@@ -1474,6 +1515,9 @@ static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_GLOBAL, "nokqueue", cfg_parse_global_disable_poller, KWF_DISCOVERY},
 	{ CFG_GLOBAL, "noevports", cfg_parse_global_disable_poller, KWF_DISCOVERY },
 	{ CFG_GLOBAL, "nopoll", cfg_parse_global_disable_poller, KWF_DISCOVERY },
+	{ CFG_GLOBAL, "expose-deprecated-directives", cfg_parse_global_non_std_directives },
+	{ CFG_GLOBAL, "expose-experimental-directives", cfg_parse_global_non_std_directives },
+	{ CFG_GLOBAL, "pidfile", cfg_parse_global_pidfile, KWF_DISCOVERY },
 	{ 0, NULL, NULL },
 }};
 
