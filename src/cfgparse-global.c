@@ -1287,6 +1287,10 @@ discovery:
 					}
 
 					rc = kwl->kw[index].parse(args, CFG_GLOBAL, NULL, NULL, file, linenum, &errmsg);
+
+					if (rc == ERR_ALERT)
+						err_code |=ERR_ALERT;
+						goto out;
 					if (rc < 0) {
 						ha_alert("parsing [%s:%d] : %s\n", file, linenum, errmsg);
 						err_code |= ERR_ALERT | ERR_FATAL;
