@@ -110,6 +110,7 @@ int cfg_maxpconn = 0;                   /* # of simultaneous connections per pro
 int cfg_maxconn = 0;			/* # of simultaneous connections, (-n) */
 char *cfg_scope = NULL;                 /* the current scope during the configuration parsing */
 int non_global_section_parsed = 0;
+int global_section_parsed = 0;
 
 /* how to handle default paths */
 static enum default_path_mode {
@@ -1832,7 +1833,7 @@ free_mem:
  * Only the two first ones can stop processing, the two others are just
  * indicators.
  */
-int parse_cfg(const struct cfgfile *cfg, int mode)
+int parse_cfg(const struct cfgfile *cfg)
 {
 	char *thisline = NULL;
 	int linesize = LINESIZE;
@@ -2565,6 +2566,9 @@ next_line:
 		if (pcs && pcs->post_section_parser) {
 			int status;
 
+			if (global.mode & MODE_DISCOVERY)
+				continue;
+
 			status = pcs->post_section_parser();
 			err_code |= status;
 			if (status & ERR_FATAL)
@@ -2581,8 +2585,11 @@ next_line:
 			fatal++;
 		} else {
 			int status;
+			
+			if ((global.mode & MODE_DISCOVERY) && (strcmp(cs->section_name, "global") != 0))
+				continue;
 
-			status = cs->section_parser(file, linenum, args, kwm, mode);
+			status = cs->section_parser(file, linenum, args, kwm);
 			err_code |= status;
 			if (status & ERR_FATAL)
 				fatal++;
@@ -2590,15 +2597,8 @@ next_line:
 			if (err_code & ERR_ABORT)
 				goto err;
 
-			if ((strcmp(cursection), 'global') == 0)
-				global_section_parsed = 1;
-
 		}
 
-		// TODO: to check conditions
-		if (((strcmp(cursection), 'global') !=0) && (global.mode & MODE_DISCOVERY) && global_section_parsed) {
-			break;
-		}
 	}
 
 	if (missing_lf != -1) {

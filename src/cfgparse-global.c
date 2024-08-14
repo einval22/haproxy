@@ -57,7 +57,7 @@ static const char *common_kw_list[] = {
  * Only the two first ones can stop processing, the two others are just
  * indicators.
  */
-int cfg_parse_global(const char *file, int linenum, char **args, int kwm, int mode)
+int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 {
 	int err_code = 0;
 	char *errmsg = NULL;
@@ -950,6 +950,11 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm, int mo
 				if (kwl->kw[index].section != CFG_GLOBAL)
 					continue;
 				if (strcmp(kwl->kw[index].kw, args[0]) == 0) {
+
+					/* in MODE_DISCOVERY we read only the kw, which contains the appropiate flag */
+					if ((global.mode & MODE_DISCOVERY) && ((kwl->kw[index].flags & KWF_DISCOVERY) == 0 ))
+						goto out;
+
 					if (check_kw_experimental(&kwl->kw[index], file, linenum, &errmsg)) {
 						ha_alert("%s\n", errmsg);
 						err_code |= ERR_ALERT | ERR_FATAL;
@@ -1050,7 +1055,7 @@ static int cfg_parse_global_master_worker(char **args, int section_type,
 					  const char *file, int line, char **err)
 {
 
-	if (!(mode & MODE_DISCOVERY))
+	if (!(global.mode & MODE_DISCOVERY))
 		return 0;
 
 	if (too_many_args(1, args, err, NULL))
@@ -1073,9 +1078,9 @@ static int cfg_parse_global_master_worker(char **args, int section_type,
 /* Parser for other modes */
 static int cfg_parse_global_mode(char **args, int section_type,
 				 struct proxy *curpx, const struct proxy *defpx,
-				 const char *file, int line, char **err, int mode)
+				 const char *file, int line, char **err)
 {
-	if (!(mode & MODE_DISCOVERY))
+	if (!(global.mode & MODE_DISCOVERY))
 		return 0;
 
 
@@ -1102,9 +1107,9 @@ static int cfg_parse_global_mode(char **args, int section_type,
 /* Disable certain poller if set */
 static int cfg_parse_global_disable_poller(char **args, int section_type,
 					   struct proxy *curpx, const struct proxy *defpx,
-					   const char *file, int line, char **err, mode)
+					   const char *file, int line, char **err)
 {
-	if (!(mode & MODE_DISCOVERY))
+	if (!(global.mode & MODE_DISCOVERY))
 		return 0;
 
 	if (too_many_args(0, args, err, NULL))
@@ -1134,6 +1139,9 @@ static int cfg_parse_global_pidfile(char **args, int section_type,
 				    struct proxy *curpx, const struct proxy *defpx,
 				    const char *file, int line, char **err)
 {
+	if (!(global.mode & MODE_DISCOVERY))
+		return 0;
+
 	if (too_many_args(1, args, err, NULL))
 		return -1;
 
@@ -1481,15 +1489,15 @@ static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_GLOBAL, "daemon", cfg_parse_global_mode, KWF_DISCOVERY } ,
 	{ CFG_GLOBAL, "quiet", cfg_parse_global_mode, KWF_DISCOVERY },
 	{ CFG_GLOBAL, "zero-warning", cfg_parse_global_mode, KWF_DISCOVERY },
-	{ CFG_GLOBAL, "noepoll", cfg_parse_global_disable_poller },
-	{ CFG_GLOBAL, "nokqueue", cfg_parse_global_disable_poller },
-	{ CFG_GLOBAL, "noevports", cfg_parse_global_disable_poller },
-	{ CFG_GLOBAL, "nopoll", cfg_parse_global_disable_poller },
-	{ CFG_GLOBAL, "pidfile", cfg_parse_global_pidfile },
+	{ CFG_GLOBAL, "noepoll", cfg_parse_global_disable_poller, KWF_DISCOVERY  },
+	{ CFG_GLOBAL, "nokqueue", cfg_parse_global_disable_poller, KWF_DISCOVERY},
+	{ CFG_GLOBAL, "noevports", cfg_parse_global_disable_poller, KWF_DISCOVERY },
+	{ CFG_GLOBAL, "nopoll", cfg_parse_global_disable_poller, KWF_DISCOVERY },
+	{ CFG_GLOBAL, "pidfile", cfg_parse_global_pidfile, KWF_DISCOVERY },
 	{ CFG_GLOBAL, "expose-deprecated-directives", cfg_parse_global_non_std_directives },
 	{ CFG_GLOBAL, "expose-experimental-directives", cfg_parse_global_non_std_directives },
 	{ CFG_GLOBAL, "tune.runqueue-depth", cfg_parse_global_tune_opts },
-	{ CFG_GLOBAL, "tune.maxpollevents", cfg_parse_global_tune_opts },
+	{ CFG_GLOBAL, "tune.maxpollevents", cfg_parse_global_tune_opts},
 	{ CFG_GLOBAL, "tune.maxaccept", cfg_parse_global_tune_opts },
 	{ CFG_GLOBAL, "tune.recv_enough", cfg_parse_global_tune_opts },
 	{ CFG_GLOBAL, "tune.bufsize", cfg_parse_global_tune_opts },

@@ -1200,7 +1200,7 @@ err:
  * Otherwise, returns an err_code, which may contain 0 (OK) or ERR_WARN,
  * ERR_ALERT. It is used in further initialization stages.
  */
-static int read_cfg(char *progname, int mode)
+static int read_cfg(char *progname)
 {
 	struct cfgfile *cfg;
 	int err_code = 0;
@@ -1216,7 +1216,7 @@ static int read_cfg(char *progname, int mode)
 	list_for_each_entry(cfg, &cfg_cfgfiles, list) {
 		int ret;
 
-		ret = parse_cfg(cfg, mode);
+		ret = parse_cfg(cfg);
 		if (ret == -1)
 			return -1;
 
@@ -2037,20 +2037,23 @@ static void init(int argc, char **argv)
 
 	usermsgs_clr("config");
 
-	/*load configs and read only mode keywords and program sections in DISCOVERY MODE */
+	/* load configs in memory */
+
 	ret = load_cfg(progname);
-	/* free memory to store config file content */
-	list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list)
-		ha_free(&cfg->content);
-	if (ret < 0)
+	if (ret == 0) {
+		/* read only global section in discovery mode */
+		ret = read_cfg(progname);
+	} 
+	if (ret < 0) {
+		list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
+			ha_free(&cfg->content);
+			ha_free(&cfg->filename);
+		}
 		exit(1);
-
-	/* read only global section in discovery mode */
-	ret = read_cfg(progname, global.mode);
-	global.mode ~= MODE_DISCOVERY;
+	}
 
 	
-	
+	global.mode &= ~MODE_DISCOVERY;
 
 	if (!LIST_ISEMPTY(&mworker_cli_conf) && !(arg_mode & MODE_MWORKER)) {
 		ha_alert("a master CLI socket was defined, but master-worker mode (-W) is not enabled.\n");
@@ -2155,8 +2158,7 @@ static void init(int argc, char **argv)
 			/* This one must not be exported, it's internal! */
 			unsetenv("HAPROXY_MWORKER_REEXEC");
 			ha_random_jump96(1);
-			/* worker reads the config */
-			read_cfg(progname);
+			
 
 			break;
 		default:
@@ -2188,6 +2190,20 @@ static void init(int argc, char **argv)
 			/* master CLI */
 			mworker_create_master_cli();
 		}
+	}
+
+	/* worker, daemon, foreground mode reads the rest of the config */
+	if (!(global.mode & MODE_MWORKER)) {
+		if (read_cfg(progname) < 0) {
+			list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
+				ha_free(&cfg->content);
+				ha_free(&cfg->filename);
+			}
+			exit(1);
+		}
+		/* all sections have been parsed */
+		list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list)
+			ha_free(&cfg->content);
 	}
 
 	/* destroy unreferenced defaults proxies  */
