@@ -2585,7 +2585,7 @@ next_line:
 			fatal++;
 		} else {
 			int status;
-			
+
 			if ((global.mode & MODE_DISCOVERY) && (strcmp(cs->section_name, "global") != 0))
 				continue;
 
