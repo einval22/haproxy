@@ -2042,6 +2042,7 @@ static void init(int argc, char **argv)
 	ret = load_cfg(progname);
 	if (ret == 0) {
 		/* read only global section in discovery mode */
+		ha_alert(">>>> Read only GLOBAL\n");
 		ret = read_cfg(progname);
 	} 
 	if (ret < 0) {
@@ -2194,6 +2195,7 @@ static void init(int argc, char **argv)
 
 	/* worker, daemon, foreground mode reads the rest of the config */
 	if (!(global.mode & MODE_MWORKER)) {
+		ha_alert(">>>> mode =0x%08x, read the rest of conf\n", global.mode);
 		if (read_cfg(progname) < 0) {
 			list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
 				ha_free(&cfg->content);
