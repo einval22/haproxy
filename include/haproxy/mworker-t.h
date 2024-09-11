@@ -24,8 +24,10 @@
 #define PROC_O_TYPE_PROG             0x00000004
 /* 0x00000008 unused */
 #define PROC_O_LEAVING               0x00000010  /* this process should be leaving */
+#define PROC_O_INIT                  0x00000020  /* process at the stage to call parser */
 /* 0x00000020 to 0x00000080 unused */
 #define PROC_O_START_RELOAD          0x00000100  /* Start the process even if the master was re-executed */
+
 
 /*
  * Structure used to describe the processes in master worker mode

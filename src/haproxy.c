@@ -728,6 +728,7 @@ static void mworker_reexec(int hardreload)
 	setenv("HAPROXY_MWORKER_REEXEC", "1", 1);
 
 	mworker_cleanup_proc();
+	ha_notice(">>>>> %s, hardreload=%d\n", __func__, hardreload);
 	mworker_proc_list_to_env(); /* put the children description in the env */
 
 	/* ensure that we close correctly every listeners before reexecuting */
@@ -832,7 +833,7 @@ void mworker_reload(int hardreload)
 	struct mworker_proc *child;
 	struct per_thread_deinit_fct *ptdf;
 
-	ha_notice("Reloading HAProxy%s\n", hardreload?" (hard-reload)":"");
+	ha_notice(">>> Reloading HAProxy%s\n", hardreload?" (hard-reload)":"");
 
 	/* close the poller FD and the thread waker pipe FD */
 	list_for_each_entry(ptdf, &per_thread_deinit_list, list)
@@ -862,6 +863,7 @@ void mworker_reload(int hardreload)
 static void mworker_loop()
 {
 
+	struct mworker_proc *child;
 	/* Busy polling makes no sense in the master :-) */
 	global.tune.options &= ~GTUNE_BUSY_POLLING;
 
@@ -891,6 +893,9 @@ static void mworker_loop()
 		signals even if there is no listener so the poll loop don't
 		leave */
 
+	list_for_each_entry(child, &proc_list, list) {
+		ha_notice(">>> master: proc at %p, proc pid=%d, proc->options=0x%08x\n", child, child->pid, child->options);
+	}
 	fork_poller();
 	run_thread_poll_loop(NULL);
 }
@@ -2086,7 +2091,7 @@ static void init(int argc, char **argv)
 			ha_alert("Cannot allocate process structures.\n");
 			exit(EXIT_FAILURE);
 		}
-		tmproc->options |= PROC_O_TYPE_WORKER; /* worker */
+		tmproc->options |= (PROC_O_TYPE_WORKER | PROC_O_INIT);                                                                                                                                                                                                                                                                                                                                    ; /* worker */
 
 		if (mworker_cli_sockpair_new(tmproc, 0) < 0) {
 			exit(EXIT_FAILURE);
@@ -3564,8 +3569,9 @@ int main(int argc, char **argv)
 			global.mode |= MODE_QUIET; /* ensure that we won't say anything from now */
 		}
 		setenv("HAPROXY_LOAD_SUCCESS", "1", 1);
-		ha_notice("Loading success.\n");
+		//ha_notice("Loading success.\n"); --> print after worker communicates its state
 		proc_self->failedreloads = 0; /* reset the number of failure */
+		/* master enters its polling loop */
 		mworker_loop();
 #if defined(USE_OPENSSL) && !defined(OPENSSL_NO_DH)
 		ssl_free_dh();
@@ -3756,6 +3762,12 @@ int main(int argc, char **argv)
 
 	/* when multithreading we need to let only the thread 0 handle the signals */
 	haproxy_unblock_signals();
+
+	/* remove PROC_INIT_STATE as ready */
+	struct mworker_proc *child;
+	list_for_each_entry(child, &proc_list, list) {
+		ha_notice(">>> proc at %p, proc pid=%d, proc->options=0x%08x\n", child, child->pid, child->options);
+	}
 
 #if defined(USE_SYSTEMD)
 	if (global.tune.options & GTUNE_USE_SYSTEMD)

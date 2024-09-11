@@ -130,14 +130,18 @@ void mworker_proc_list_to_env()
 		if (child->reloads < minreloads)
 			minreloads = child->reloads;
 
-		if (child->pid > -1)
-			memprintf(&msg, "%s|type=%c;fd=%d;cfd=%d;pid=%d;reloads=%d;failedreloads=%d;timestamp=%d;id=%s;version=%s", msg ? msg : "", type, child->ipc_fd[0], child->ipc_fd[1], child->pid, child->reloads, child->failedreloads, child->timestamp, child->id ? child->id : "", child->version);
+		if (child->pid > -1) {
+			memprintf(&msg, "%s|type=%c;fd=%d;cfd=%d;pid=%d;reloads=%d;failedreloads=%d;timestamp=%d;id=%s;version=%s",
+				msg ? msg : "", type, child->ipc_fd[0], child->ipc_fd[1], child->pid, child->reloads, child->failedreloads, child->timestamp, child->id ? child->id : "", child->version);
+			ha_notice(">>> %s: for PID %d, msg='%s'\n", __func__, child->pid, msg);
+		}
 	}
 	if (msg)
 		setenv("HAPROXY_PROCESSES", msg, 1);
 
 	list_for_each_entry(child, &proc_list, list) {
 		if (child->reloads > minreloads && !(child->options & PROC_O_TYPE_MASTER)) {
+		//if (!(child->options & PROC_O_TYPE_MASTER)) {
 			child->options |= PROC_O_LEAVING;
 		}
 	}
@@ -176,6 +180,7 @@ int mworker_env_to_proc_list()
 	int err = 0;
 
 	env = getenv("HAPROXY_PROCESSES");
+	ha_notice(">>> %s: env='%s'\n", __func__, env);
 	if (!env)
 		goto no_env;
 
@@ -186,6 +191,7 @@ int mworker_env_to_proc_list()
 		goto out;
 	}
 
+	
 	while ((token = strtok_r(msg, "|", &s1))) {
 		char *subtoken = NULL;
 		char *s2;
@@ -215,6 +221,7 @@ int mworker_env_to_proc_list()
 				} else if (type == 'w') {
 					child->options |= PROC_O_TYPE_WORKER;
 				}
+				ha_notice(">>> %s: created entry for type 0x%08x\n", __func__, child->options);
 
 			} else if (strncmp(subtoken, "fd=", 3) == 0) {
 				child->ipc_fd[0] = atoi(subtoken+3);
@@ -228,10 +235,13 @@ int mworker_env_to_proc_list()
 				child->pid = atoi(subtoken+4);
 			} else if (strncmp(subtoken, "reloads=", 8) == 0) {
 				/* we only increment the number of asked reload */
+				
 				child->reloads = atoi(subtoken+8);
-
-				if (child->reloads < minreloads)
+				ha_notice(">>> %s: reloads=%d for pid=%d, min reloads=%d'\n", __func__, child->reloads,child->pid, minreloads);
+				if (child->reloads < minreloads) {
 					minreloads = child->reloads;
+					ha_notice(">>> %s: new min reloads=%d'\n", __func__, minreloads);
+				}
 			} else if (strncmp(subtoken, "failedreloads=", 14) == 0) {
 				child->failedreloads = atoi(subtoken+14);
 			} else if (strncmp(subtoken, "timestamp=", 10) == 0) {
@@ -243,6 +253,7 @@ int mworker_env_to_proc_list()
 			}
 		}
 		if (child->pid) {
+			ha_notice(">>> %s: append entry for PID %d\n", __func__, child->pid);
 			LIST_APPEND(&proc_list, &child->list);
 		} else {
 			mworker_free_child(child);
@@ -252,7 +263,8 @@ int mworker_env_to_proc_list()
 	/* set the leaving processes once we know which number of reloads are the current processes */
 
 	list_for_each_entry(child, &proc_list, list) {
-		if (child->reloads > minreloads)
+		ha_notice(">>>>> %s: pid=%d, reloads =%d minreloads=%d'\n", __func__, child->pid, child->reloads, minreloads);
+		if (child->reloads > 0)
 			child->options |= PROC_O_LEAVING;
 	}
 
@@ -390,7 +402,8 @@ restart_wait:
 						ha_warning("A worker process unexpectedly died and this can only be explained by a bug in haproxy or its dependencies.\nPlease check that you are running an up to date and maintained version of haproxy and open a bug report.\n");
 						display_version();
 					}
-					if (!(global.tune.options & GTUNE_NOEXIT_ONFAILURE)) {
+					/* new worker, which has been launched at reload has status PROC_O_INIT */ 
+					if (!(global.tune.options & GTUNE_NOEXIT_ONFAILURE) && !(child->options & PROC_O_INIT)) {
 						ha_alert("exit-on-failure: killing every processes with SIGTERM\n");
 						mworker_kill(SIGTERM);
 					}
