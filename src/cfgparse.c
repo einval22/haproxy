@@ -2580,6 +2580,9 @@ next_line:
 		pcs = NULL;
 
 		if (!cs) {
+			/* ignore unknown section names during the first read in DISCOVERY mode */
+			if (global.mode & MODE_DISCOVERY)
+				continue;
 			ha_alert("parsing [%s:%d]: unknown keyword '%s' out of section.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			fatal++;
