@@ -385,6 +385,10 @@ restart_wait:
 		if (!childfound) {
 			/* We didn't find the PID in the list, that shouldn't happen but we can emit a warning */
 			ha_warning("Process %d exited with code %d (%s)\n", exitpid, status, (status >= 128) ? strsignal(status - 128) : "Exit");
+		} else if (child->options & PROC_O_INIT) {
+			on_new_child_failure();
+			if ((proc_self->options & PROC_O_TYPE_MASTER) && (proc_self->reloads == 0))
+				exit(exitcode);
 		} else {
 			/* check if exited child is a current child */
 			if (!(child->options & PROC_O_LEAVING)) {
