@@ -2464,6 +2464,38 @@ static int cli_parse_simple(char **args, char *payload, struct appctx *appctx, v
 	return 1;
 }
 
+
+static int _send_status(char **args, char *payload, struct appctx *appctx, void *private)
+{
+
+	struct mworker_proc *proc;
+
+	BUG_ON((strcmp(args[0], "_send_status") != 0), "Triggered in _send_status by unsupported command name.\n");
+	ha_notice(">>>>%s: %s\n", __func__, args[0]);
+	char *status = args[1];
+	int pid = atoi(args[2]);
+	ha_notice(">>>>%s: %s\n", __func__, args[1]);
+	ha_notice(">>>>%s: %s\n", __func__, args[2]);
+	ha_notice(">>>>%s: payload=%s\n", __func__, payload);
+
+	if  (strcmp(status, "PROC_O_READY") == 0) {
+		list_for_each_entry(proc, &proc_list, list) {
+			ha_notice(">>> %s: proc->pid=%d, opts=0x%08x, proc->ipc_fd_0=%d, proc->ipc_fd_1=%d\n", __func__, proc->pid, proc->options, proc->ipc_fd[0], proc->ipc_fd[1]);
+			
+			if (proc->pid == pid) {
+				proc->options &= ~PROC_O_INIT;
+				proc->options |= PROC_O_READY;
+
+				break;
+			}
+		}
+	} else {
+		ha_warning(">>> Bad status: %s\n", status);
+	}
+
+	return 1;
+}
+
 void pcli_write_prompt(struct stream *s)
 {
 	struct buffer *msg = get_trash_chunk();
@@ -3480,15 +3512,15 @@ err:
  * Create a new CLI socket using a socketpair for a worker process
  * <mworker_proc> is the process structure, and <proc> is the process number
  */
-int mworker_cli_sockpair_new(struct mworker_proc *mworker_proc, int proc)
+int mworker_cli_sockpair_new(struct mworker_proc *worker_proc, int proc)
 {
 	struct bind_conf *bind_conf;
 	struct listener *l;
 	char *path = NULL;
 	char *err = NULL;
 
-	/* master pipe to ensure the master is still alive  */
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, mworker_proc->ipc_fd) < 0) {
+	
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, worker_proc->ipc_fd) < 0) {
 		ha_alert("Cannot create worker socketpair.\n");
 		return -1;
 	}
@@ -3508,8 +3540,8 @@ int mworker_cli_sockpair_new(struct mworker_proc *mworker_proc, int proc)
 	bind_conf->level &= ~ACCESS_LVL_MASK;
 	bind_conf->level |= ACCESS_LVL_ADMIN; /* TODO: need to lower the rights with a CLI keyword*/
 	bind_conf->level |= ACCESS_FD_LISTENERS;
-
-	if (!memprintf(&path, "sockpair@%d", mworker_proc->ipc_fd[1])) {
+	// ipc_fd[1] -> worker listen
+	if (!memprintf(&path, "sockpair@%d", worker_proc->ipc_fd[1])) {
 		ha_alert("Cannot allocate listener.\n");
 		goto error;
 	}
@@ -3538,8 +3570,8 @@ int mworker_cli_sockpair_new(struct mworker_proc *mworker_proc, int proc)
 	return 0;
 
 error:
-	close(mworker_proc->ipc_fd[0]);
-	close(mworker_proc->ipc_fd[1]);
+	close(worker_proc->ipc_fd[0]);
+	close(worker_proc->ipc_fd[1]);
 	free(err);
 
 	return -1;
@@ -3589,6 +3621,7 @@ static struct cli_kw_list cli_kws = {{ },{
 	{ { "operator", NULL },                  "operator                                : lower the level of the current CLI session to operator",  cli_parse_set_lvl, NULL, NULL, NULL, ACCESS_MASTER},
 	{ { "user", NULL },                      "user                                    : lower the level of the current CLI session to user",      cli_parse_set_lvl, NULL, NULL, NULL, ACCESS_MASTER},
 	{ { "wait", NULL },                      "wait {-h|<delay_ms>} cond [args...]     : wait the specified delay or condition (-h to see list)",  cli_parse_wait, cli_io_handler_wait, cli_release_wait, NULL },
+	{ { "_send_status", NULL },              NULL,  											      _send_status, NULL, NULL, NULL, ACCESS_MASTER_ONLY },
 	{{},}
 }};
 

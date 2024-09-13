@@ -109,6 +109,7 @@
 #include <haproxy/peers.h>
 #include <haproxy/pool.h>
 #include <haproxy/protocol.h>
+#include <haproxy/proto_sockpair.h>
 #include <haproxy/proto_tcp.h>
 #include <haproxy/proxy.h>
 #include <haproxy/regex.h>
@@ -896,6 +897,10 @@ static void mworker_loop()
 	list_for_each_entry(child, &proc_list, list) {
 		ha_notice(">>> master: proc at %p, proc pid=%d, proc->options=0x%08x\n", child, child->pid, child->options);
 	}
+
+	ha_notice(">>> proc_self=%p, proc_self->ipc_fd[0]=%d, proc_self->ipc_fd[1]=%d\n", proc_self, proc_self->ipc_fd[0],proc_self->ipc_fd[1]);
+
+	
 	fork_poller();
 	run_thread_poll_loop(NULL);
 }
@@ -2088,6 +2093,11 @@ static void init(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		}
 
+		ha_notice(">>> worker: pid=%d, opts=0x%08x, fd_0=%d, fd_1=%d\n", tmproc->pid, tmproc->options, tmproc->ipc_fd[0],  tmproc->ipc_fd[1]);
+
+		//  "sockpair@%d", fd
+
+
 		LIST_APPEND(&proc_list, &tmproc->list);
 	}
 
@@ -2167,6 +2177,8 @@ static void init(int argc, char **argv)
 			ha_notice("New worker (%d) forked\n", worker_pid);
 			/* find the right mworker_proc */
 			list_for_each_entry(child, &proc_list, list) {
+				ha_notice(">>> in parent: proc->pid=%d, opts=0x%08x, proc->ipc_fd_0=%d, proc->ipc_fd_1=%d\n", child->pid, child->options, child->ipc_fd[0], child->ipc_fd[1]);
+				
 				if (child->reloads == 0 && child->options & PROC_O_TYPE_WORKER && child->pid == -1) {
 						child->timestamp = date.tv_sec;
 						child->pid = worker_pid;
@@ -2178,6 +2190,12 @@ static void init(int argc, char **argv)
 						break;
 				}
 			}
+
+			ha_notice(">>> final list\n");
+			list_for_each_entry(child, &proc_list, list) {
+				ha_notice("+++ in parent: proc->pid=%d, opts=0x%08x, proc->ipc_fd_0=%d, proc->ipc_fd_1=%d\n", child->pid, child->options, child->ipc_fd[0], child->ipc_fd[1]);
+				
+			}
 			/* in exec mode, there's always exactly one thread. Failure to
 			 * set these ones now will result in nbthread being detected
 			 * automatically.
@@ -2186,6 +2204,22 @@ static void init(int argc, char **argv)
 			global.nbthread = 1;
 			/* master CLI */
 			mworker_create_master_cli();
+
+			list_for_each_entry(child, &proc_list, list) {
+				if (child->pid == worker_pid) {
+					ha_notice("+++ in parent: found child PID=%d\n", child->pid);
+
+					break;
+				}
+			}
+
+			//master_listener = dup(child->ipc_fd[0]);
+			char *sock_name = NULL;
+			memprintf(&sock_name, "sockpair@%d", child->ipc_fd[0]);
+			ha_notice(">>>sock_name='%s'\n", sock_name);
+
+			mworker_cli_proxy_new_listener(sock_name);
+			ha_free(&sock_name);
 		}
 	}
 
@@ -3754,11 +3788,49 @@ int main(int argc, char **argv)
 	/* when multithreading we need to let only the thread 0 handle the signals */
 	haproxy_unblock_signals();
 
-	/* remove PROC_INIT_STATE as ready */
+	/* send PROC_O_READY to remove PROC_O_INIT */
+
+	int sock_pair[2];
+	char *msg = NULL;
+	
+	//int dst_fd;
+	//int master_sock = -1;
+
+	//dst_fd = strtoll(unixsocket + strlen("sockpair@"), NULL, 0);
+
+	if (socketpair(PF_UNIX, SOCK_STREAM, 0, sock_pair) == -1) {
+		ha_warning("socketpair(): Cannot create socketpair to update state\n");
+		deinit_and_exit(-1);
+	}
+	ha_notice(">>> proc_self=%p, proc_self->pid=%d, proc_self->ipc_fd[0]=%d, proc_self->ipc_fd[1]=%d, sp_1=%d, sp_2=%d\n", proc_self, proc_self->pid, proc_self->ipc_fd[0],proc_self->ipc_fd[1],sock_pair[0], sock_pair[1] );
+	
 	struct mworker_proc *child;
 	list_for_each_entry(child, &proc_list, list) {
-		ha_notice(">>> proc at %p, proc pid=%d, proc->options=0x%08x\n", child, child->pid, child->options);
+		ha_notice(">>> proc at %p, proc pid=%d, proc->options=0x%08x, proc->ipc_fd[0]=%d, proc->ipc_fd[1]=%d\n", child, child->pid, child->options, child->ipc_fd[0],child->ipc_fd[1]);
+		if (child->pid == -1) {
+			ha_notice(">>>>> proc at %p, proc pid=%d, proc->options=0x%08x, proc->ipc_fd[0]=%d, proc->ipc_fd[1]=%d\n", child, child->pid, child->options, child->ipc_fd[0],child->ipc_fd[1]);
+			break;
+		}
 	}
+
+	ha_notice(">>> send %d to %d\n",  sock_pair[0], child->ipc_fd[0]);
+	if (send_fd_uxst(child->ipc_fd[1], sock_pair[0]) == -1) {
+		ha_alert("socketpair: Cannot transfer the fd %d over sockpair@%d\n", sock_pair[0], child->ipc_fd[0]);
+		close(sock_pair[0]);
+		close(sock_pair[1]);
+		deinit_and_exit(-1);
+		
+	}
+
+	memprintf(&msg, "_send_status PROC_O_READY %d\n", getpid());
+	ha_notice(">>> msg=%s\n", msg);
+	
+	if (send(sock_pair[1], msg, strlen(msg), 0) != strlen(msg)) {
+		ha_warning("Failed to send READY status to master!\n");
+		deinit_and_exit(-1);
+	}
+	ha_free(&msg);
+
 
 #if defined(USE_SYSTEMD)
 	if (global.tune.options & GTUNE_USE_SYSTEMD)

@@ -842,6 +842,7 @@ void mworker_create_master_cli(void)
 		 * Both FDs will be kept in the master. The sockets are
 		 * created only if they weren't inherited.
 		 */
+		ha_notice(">>> %s before: proc_self->pid=%d, opts=0x%08x, proc_self->ipc_fd_0=%d, proc_self->ipc_fd_1=%d\n", __func__, proc_self->pid, proc_self->options, proc_self->ipc_fd[0], proc_self->ipc_fd[1]);
 		if ((proc_self->ipc_fd[1] == -1) &&
 		     socketpair(AF_UNIX, SOCK_STREAM, 0, proc_self->ipc_fd) < 0) {
 			ha_alert("Can't create the mcli_reload socketpair.\n");
@@ -850,11 +851,15 @@ void mworker_create_master_cli(void)
 
 		/* Create the mcli_reload listener from the proc_self struct */
 		memprintf(&path, "sockpair@%d", proc_self->ipc_fd[1]);
+		ha_notice("%s: path to bind %s\n", __func__, path);
+		ha_notice(">>> %s after: proc_self->pid=%d, opts=0x%08x, proc_self->ipc_fd_0=%d, proc_self->ipc_fd_1=%d\n", __func__, proc_self->pid, proc_self->options, proc_self->ipc_fd[0], proc_self->ipc_fd[1]);
 		mcli_reload_bind_conf = mworker_cli_proxy_new_listener(path);
 		if (mcli_reload_bind_conf == NULL) {
 			ha_alert("Can't create the mcli_reload listener.\n");
 			exit(EXIT_FAILURE);
 		}
+
+		ha_notice(">>> %s: proc_self->pid=%d, opts=0x%08x, proc_self->ipc_fd_0=%d, proc_self->ipc_fd_1=%d\n", __func__, proc_self->pid, proc_self->options, proc_self->ipc_fd[0], proc_self->ipc_fd[1]);
 		ha_free(&path);
 	}
 }
