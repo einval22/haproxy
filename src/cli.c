@@ -2484,7 +2484,7 @@ static int _send_status(char **args, char *payload, struct appctx *appctx, void 
 			
 			if (proc->pid == pid) {
 				proc->options &= ~PROC_O_INIT;
-				proc->options |= PROC_O_READY;
+				//proc->options |= PROC_O_READY;
 
 				break;
 			}
@@ -2492,6 +2492,9 @@ static int _send_status(char **args, char *payload, struct appctx *appctx, void 
 	} else {
 		ha_warning(">>> Bad status: %s\n", status);
 	}
+
+	ha_notice(">>> %s: proc->pid=%d, opts=0x%08x\n", __func__, proc->pid, proc->options);
+	setenv("HAPROXY_LOAD_SUCCESS", "1", 1); // parsed in cli_io_handler_show_loadstatus
 
 	return 1;
 }
@@ -3322,6 +3325,8 @@ int mworker_cli_proxy_create()
 	if (!mworker_proxy)
 		goto error_proxy;
 
+	ha_notice(">>> %s; allocated MASTER proxy\n", __func__);
+
 	mworker_proxy->mode = PR_MODE_CLI;
 	mworker_proxy->maxconn = 10;                 /* default to 10 concurrent connections */
 	mworker_proxy->timeout.client = 0; /* no timeout */
@@ -3340,6 +3345,8 @@ int mworker_cli_proxy_create()
 		struct sockaddr_storage *sk;
 		int port1, port2, port;
 		struct protocol *proto;
+
+		ha_notice(">>> %s; proc pid=%d, opts=0x%08x; fd_0=%d, fd_1=%d\n", __func__, child->pid, child->options, child->ipc_fd[0], child->ipc_fd[1]);
 
 		/* only the workers support the master CLI */
 		if (!(child->options & PROC_O_TYPE_WORKER))
@@ -3361,7 +3368,7 @@ int mworker_cli_proxy_create()
 		newsrv->id = strdup(msg);
 		newsrv->conf.line = 0;
 
-		memprintf(&msg, "sockpair@%d", child->ipc_fd[0]);
+		memprintf(&msg, "sockpair@%d", child->ipc_fd[0]); // set server
 		if ((sk = str2sa_range(msg, &port, &port1, &port2, NULL, &proto, NULL,
 		                       &errmsg, NULL, NULL, NULL, PA_O_STREAM)) == 0) {
 			goto error;
@@ -3381,6 +3388,8 @@ int mworker_cli_proxy_create()
 		srv_lb_commit_status(newsrv);
 
 		child->srv = newsrv;
+		ha_notice(">>> %s; MASTER: worker pid=%d, opts=0x%08x; SERVER is on fd_0=%d\n", __func__, child->pid, child->options, child->ipc_fd[0]);
+		
 	}
 
 	mworker_proxy->next = proxies_list;
@@ -3492,11 +3501,15 @@ struct bind_conf *mworker_cli_proxy_new_listener(char *line)
 	/* Pin master CLI on the first thread of the first group only */
 	thread_set_pin_grp1(&bind_conf->thread_set, 1);
 
+	ha_notice(">>> %s allocated %s bindconf with FE: %s\n", __func__, bind_conf->file, bind_conf->frontend->id);
+
 	list_for_each_entry(l, &bind_conf->listeners, by_bind) {
 		l->rx.flags |= RX_F_MWORKER; /* we are keeping this FD in the master */
 		global.maxsock++; /* for the listening socket */
+		ha_notice(">>> %s: created listener on fd=%d, proto=%s, flags=0x%08x, bindconf=%s, FE=%s\n", __func__, l->rx.fd, l->rx.proto->name, l->rx.flags, bind_conf->file, bind_conf->frontend->id);
 	}
 	global.maxsock += mworker_proxy->maxconn;
+	
 
 	return bind_conf;
 
@@ -3560,11 +3573,14 @@ int mworker_cli_sockpair_new(struct mworker_proc *worker_proc, int proc)
 	/* Pin master CLI on the first thread of the first group only */
 	thread_set_pin_grp1(&bind_conf->thread_set, 1);
 
+	ha_notice(">>> %s NEW SOCKPAIR: 0=%d, 1=%d\n", __func__, worker_proc->ipc_fd[0], worker_proc->ipc_fd[1]);
+	ha_notice(">>> %s allocated new bindconf %s with FE %s\n", __func__, bind_conf->file, bind_conf->frontend->id);
 	list_for_each_entry(l, &bind_conf->listeners, by_bind) {
 		HA_ATOMIC_INC(&unstoppable_jobs);
 		/* it's a sockpair but we don't want to keep the fd in the master */
 		l->rx.flags &= ~RX_F_INHERITED;
 		global.maxsock++; /* for the listening socket */
+		ha_notice(">>> %s: created listener on fd=%d, proto=%s, flags=0x%08x, bindconf=%s, FE=%s\n", __func__, l->rx.fd, l->rx.proto->name, l->rx.flags, bind_conf->file, bind_conf->frontend->id);
 	}
 
 	return 0;

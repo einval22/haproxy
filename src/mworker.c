@@ -353,23 +353,35 @@ void mworker_catch_sigchld(struct sig_handler *sh)
 	int exitpid = -1;
 	int status = 0;
 	int childfound;
+	struct listener *l, *l_next;
+	struct proxy *curproxy;
 
 restart_wait:
 
 	childfound = 0;
 
 	exitpid = waitpid(-1, &status, WNOHANG);
+	ha_notice(">>> %s: exitpid=%d\n", __func__, exitpid);
 	if (exitpid > 0) {
+		
 		struct mworker_proc *child, *it;
-
-		if (WIFEXITED(status))
+		ha_notice(">>> %s: pid=%d EXITED, status=0x%08x\n", __func__, exitpid, status);
+		if (WIFEXITED(status)) {
 			status = WEXITSTATUS(status);
-		else if (WIFSIGNALED(status))
+			ha_notice(">>> %s: pid=%d EXITED, WEXITSTATUS(status)=%d\n", __func__, exitpid, status);
+		}
+		else if (WIFSIGNALED(status)) {
 			status = 128 + WTERMSIG(status);
-		else if (WIFSTOPPED(status))
+			ha_notice(">>> %s: pid=%d EXITED, WIFSIGNALED(status)=%d,  WTERMSIG(status)=%d\n", __func__, exitpid, status, WTERMSIG(status));
+		} else if (WIFSTOPPED(status)) {
 			status = 128 + WSTOPSIG(status);
-		else
+			ha_notice(">>> %s: pid=%d EXITED, WIFSTOPPED(status)=%d,  WSTOPSIG(status)=%d\n", __func__, exitpid, status, WSTOPSIG(status));
+		} else {
 			status = 255;
+
+		}
+
+		ha_notice(">>> %s: pid=%d EXITED, status=0x%08x\n", __func__, exitpid, status);
 
 		/* delete the child from the process list */
 		list_for_each_entry_safe(child, it, &proc_list, list) {
@@ -377,16 +389,47 @@ restart_wait:
 				continue;
 
 			LIST_DELETE(&child->list);
-			close(child->ipc_fd[0]);
+			ha_notice(">>> %s: pid=%d EXITED\n", __func__, exitpid);
+			//close(child->ipc_fd[0]); // dispatch to each case (O_LEAVING, O_INIT)
 			childfound = 1;
 			break;
 		}
 
+		ha_notice(">>> %s: child=%p, child->pid=%d, child->ipc_fd[0]=%d, child->ipc_fd[1]=%d, child->options=0x%08x\n", __func__, child,  child->pid, child->ipc_fd[0],child->ipc_fd[1], child->options);
 		if (!childfound) {
 			/* We didn't find the PID in the list, that shouldn't happen but we can emit a warning */
 			ha_warning("Process %d exited with code %d (%s)\n", exitpid, status, (status >= 128) ? strsignal(status - 128) : "Exit");
 		} else if (child->options & PROC_O_INIT) {
-			on_new_child_failure();
+			on_new_child_failure(); // set setenv("HAPROXY_LOAD_SUCCESS", "0", 1);
+
+			
+			/* detach listeners */
+			for (curproxy = proxies_list; curproxy; curproxy = curproxy->next) {
+				list_for_each_entry_safe(l, l_next, &curproxy->conf.listeners, by_fe) {
+					/* remove the listener, but not those we need in the master... */
+					ha_notice(">>>>> %s: got listener on fd=%d, list->rx.flags=0x%08x, proto=%s\n", __func__, l->rx.fd, l->rx.flags, l->rx.proto->name);
+					if ((l->rx.fd == child->ipc_fd[0]) || (l->rx.fd == child->ipc_fd[1])) {
+						ha_notice(">>>>> %s: listener is unbound and del for fd %d\n", __func__, l->rx.fd);
+						unbind_listener(l);
+						delete_listener(l);
+					}
+						
+				}
+			}
+			
+			/* clean ipc_fd and drop server */
+			//if (child->ipc_fd[0] > -1)
+			//	close(child->ipc_fd[0]);
+			//if (child->ipc_fd[1] > -1)
+			//	close(child->ipc_fd[1]);
+			if (child->srv) {
+				/* only exists if we created a master CLI listener */
+				srv_drop(child->srv);
+			}
+			ha_notice(">>> %s: child pid=%d, opts=0x%08x, EXITED; will delete and close IPC child->ipc_fd[0]=%d\n", __func__, exitpid, child->options, child->ipc_fd[0]);
+			fd_delete(child->ipc_fd[0]);
+			close(child->ipc_fd[0]);
+			/* when worker fails during the first startup, no previous workers with state PROC_O_LEAVING */
 			if ((proc_self->options & PROC_O_TYPE_MASTER) && (proc_self->reloads == 0))
 				exit(exitcode);
 		} else {
@@ -416,6 +459,9 @@ restart_wait:
 				if (exitcode < 0 && status != 0 && status != 143)
 					exitcode = status;
 			} else {
+				ha_notice(">>> %s: child pid=%d, opts=0x%08x, EXITED; will close IPC child->ipc_fd[0]=%d\n", __func__, exitpid, child->options, child->ipc_fd[0]);
+				fd_delete(child->ipc_fd[0]);
+				close(child->ipc_fd[0]);
 				if (child->options & PROC_O_TYPE_WORKER) {
 					ha_warning("Former worker (%d) exited with code %d (%s)\n", exitpid, status, (status >= 128) ? strsignal(status - 128) : "Exit");
 					delete_oldpid(exitpid);
@@ -519,11 +565,12 @@ void mworker_cleanlisteners()
 	struct proxy *curproxy;
 	struct peers *curpeers;
 
+	ha_notice(">>>>> %s\n", __func__);
 	/* peers proxies cleanup */
 	for (curpeers = cfg_peers; curpeers; curpeers = curpeers->next) {
 		if (!curpeers->peers_fe)
 			continue;
-
+		ha_notice(">>>>> %s clean cfg_peers\n", __func__);
 		stop_proxy(curpeers->peers_fe);
 		/* disable this peer section so that it kills itself */
 		if (curpeers->sighandler)
@@ -539,9 +586,12 @@ void mworker_cleanlisteners()
 
 		list_for_each_entry_safe(l, l_next, &curproxy->conf.listeners, by_fe) {
 			/* remove the listener, but not those we need in the master... */
+			ha_notice(">>>>> %s: fd=%d, list->rx.flags=0x%08x, proto=%s\n", __func__, l->rx.fd, l->rx.flags, l->rx.proto->name);
 			if (!(l->rx.flags & RX_F_MWORKER)) {
+				ha_notice(">>>>> %s: listener at proxy %s is unbound and del for fd %d\n", __func__, curproxy->id, l->rx.fd);
 				unbind_listener(l);
 				delete_listener(l);
+				
 			} else {
 				listen_in_master = 1;
 			}
@@ -560,9 +610,13 @@ void mworker_cleanup_proc()
 {
 	struct mworker_proc *child, *it;
 
-	list_for_each_entry_safe(child, it, &proc_list, list) {
+	ha_notice(">>>>> %s\n", __func__);
 
+	list_for_each_entry_safe(child, it, &proc_list, list) {
+		
 		if (child->pid == -1) {
+			ha_notice(">>>>> %s: child->pid=%d, child->ipc_fd[0]=%d, child->ipc_fd[1]=%d,  child->options=0x%08x\n",
+				__func__, child->pid, child->ipc_fd[0], child->ipc_fd[1], child->options);
 			/* Close the socketpairs. */
 			if (child->ipc_fd[0] > -1)
 				close(child->ipc_fd[0]);
@@ -576,6 +630,8 @@ void mworker_cleanup_proc()
 			mworker_free_child(child);
 		}
 	}
+	ha_notice(">>>>> returned %s\n", __func__);
+	
 }
 
 
@@ -717,8 +773,10 @@ static int cli_parse_reload(char **args, char *payload, struct appctx *appctx, v
 	if (conn)
 		fd = conn_fd(conn);
 
+	ha_notice(">>>%s: send conn fd=%d to proc_self->ipc_fd[0]=%d\n", __func__, fd, proc_self->ipc_fd[0]);
 	/* Send the FD of the current session to the "cli_reload" FD, which won't be polled */
 	if (fd != -1 && send_fd_uxst(proc_self->ipc_fd[0], fd) == 0) {
+		ha_notice(">>>%s: fd_delete on %d\n", __func__, fd);
 		fd_delete(fd); /* avoid the leak of the FD after sending it via the socketpair */
 	}
 	mworker_reload(hardreload);
@@ -810,6 +868,8 @@ void mworker_create_master_cli(void)
 {
 	struct wordlist *it, *c;
 
+	ha_notice(">>> %s: MASTER\n", __func__);
+
 	/* get the info of the children in the env */
 	if (mworker_env_to_proc_list() < 0) {
 		exit(EXIT_FAILURE);
@@ -842,7 +902,8 @@ void mworker_create_master_cli(void)
 		 * Both FDs will be kept in the master. The sockets are
 		 * created only if they weren't inherited.
 		 */
-		ha_notice(">>> %s before: proc_self->pid=%d, opts=0x%08x, proc_self->ipc_fd_0=%d, proc_self->ipc_fd_1=%d\n", __func__, proc_self->pid, proc_self->options, proc_self->ipc_fd[0], proc_self->ipc_fd[1]);
+		//ha_notice(">>> %s: before: proc_self->pid=%d, opts=0x%08x, proc_self->ipc_fd_0=%d, proc_self->ipc_fd_1=%d\n", __func__, proc_self->pid, proc_self->options, proc_self->ipc_fd[0], proc_self->ipc_fd[1]);
+
 		if ((proc_self->ipc_fd[1] == -1) &&
 		     socketpair(AF_UNIX, SOCK_STREAM, 0, proc_self->ipc_fd) < 0) {
 			ha_alert("Can't create the mcli_reload socketpair.\n");
@@ -851,8 +912,8 @@ void mworker_create_master_cli(void)
 
 		/* Create the mcli_reload listener from the proc_self struct */
 		memprintf(&path, "sockpair@%d", proc_self->ipc_fd[1]);
-		ha_notice("%s: path to bind %s\n", __func__, path);
-		ha_notice(">>> %s after: proc_self->pid=%d, opts=0x%08x, proc_self->ipc_fd_0=%d, proc_self->ipc_fd_1=%d\n", __func__, proc_self->pid, proc_self->options, proc_self->ipc_fd[0], proc_self->ipc_fd[1]);
+		
+		//ha_notice(">>> %s after: proc_self->pid=%d, opts=0x%08x, proc_self->ipc_fd_0=%d, proc_self->ipc_fd_1=%d\n", __func__, proc_self->pid, proc_self->options, proc_self->ipc_fd[0], proc_self->ipc_fd[1]);
 		mcli_reload_bind_conf = mworker_cli_proxy_new_listener(path);
 		if (mcli_reload_bind_conf == NULL) {
 			ha_alert("Can't create the mcli_reload listener.\n");

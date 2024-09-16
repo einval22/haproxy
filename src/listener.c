@@ -806,7 +806,7 @@ int create_listeners(struct bind_conf *bc, const struct sockaddr_storage *ss,
 		l->rx.owner = l;
 		l->rx.iocb = proto->default_iocb;
 		l->rx.fd = fd;
-
+		ha_notice("=== %s: create listener on fd=%d, proto=%s, bindconf=%s, proxy=%s\n", __func__, fd, proto->name, bc->file, bc->frontend->id);
 		l->rx.rhttp.task = NULL;
 		l->rx.rhttp.srv = NULL;
 		l->rx.rhttp.pend_conn = NULL;
