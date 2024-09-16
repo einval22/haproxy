@@ -406,7 +406,7 @@ restart_wait:
 			/* detach listeners */
 			for (curproxy = proxies_list; curproxy; curproxy = curproxy->next) {
 				list_for_each_entry_safe(l, l_next, &curproxy->conf.listeners, by_fe) {
-					/* remove the listener, but not those we need in the master... */
+					/* detach all listeners*/
 					ha_notice(">>>>> %s: got listener on fd=%d, list->rx.flags=0x%08x, proto=%s\n", __func__, l->rx.fd, l->rx.flags, l->rx.proto->name);
 					if ((l->rx.fd == child->ipc_fd[0]) || (l->rx.fd == child->ipc_fd[1])) {
 						ha_notice(">>>>> %s: listener is unbound and del for fd %d\n", __func__, l->rx.fd);
@@ -428,7 +428,7 @@ restart_wait:
 			}
 			ha_notice(">>> %s: child pid=%d, opts=0x%08x, EXITED; will delete and close IPC child->ipc_fd[0]=%d\n", __func__, exitpid, child->options, child->ipc_fd[0]);
 			fd_delete(child->ipc_fd[0]);
-			close(child->ipc_fd[0]);
+			
 			/* when worker fails during the first startup, no previous workers with state PROC_O_LEAVING */
 			if ((proc_self->options & PROC_O_TYPE_MASTER) && (proc_self->reloads == 0))
 				exit(exitcode);
@@ -461,7 +461,6 @@ restart_wait:
 			} else {
 				ha_notice(">>> %s: child pid=%d, opts=0x%08x, EXITED; will close IPC child->ipc_fd[0]=%d\n", __func__, exitpid, child->options, child->ipc_fd[0]);
 				fd_delete(child->ipc_fd[0]);
-				close(child->ipc_fd[0]);
 				if (child->options & PROC_O_TYPE_WORKER) {
 					ha_warning("Former worker (%d) exited with code %d (%s)\n", exitpid, status, (status >= 128) ? strsignal(status - 128) : "Exit");
 					delete_oldpid(exitpid);
@@ -779,6 +778,9 @@ static int cli_parse_reload(char **args, char *payload, struct appctx *appctx, v
 		ha_notice(">>>%s: fd_delete on %d\n", __func__, fd);
 		fd_delete(fd); /* avoid the leak of the FD after sending it via the socketpair */
 	}
+	// check worker status 
+
+	
 	mworker_reload(hardreload);
 
 	return 1;

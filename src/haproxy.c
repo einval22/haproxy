@@ -2251,6 +2251,7 @@ static void init(int argc, char **argv)
 		}
 	}
 
+	// master run
 	/* worker, daemon, foreground mode reads the rest of the config */
 	if (!(global.mode & MODE_MWORKER)) {
 		ha_alert(">>>> mode =0x%08x, read the rest of conf\n", global.mode);
@@ -3567,6 +3568,10 @@ int main(int argc, char **argv)
 	if (master)
 		mworker_kill_max_reloads(SIGTERM);
 
+
+	if (nb_oldpids && !master)
+		nb_oldpids = tell_old_pids(oldpids_sig);
+
 	/* Note that any error at this stage will be fatal because we will not
 	 * be able to restart the old pids.
 	 */
@@ -3851,7 +3856,8 @@ int main(int argc, char **argv)
 		deinit_and_exit(-1);
 		
 	}
-
+	
+	close(sock_pair[0]);
 	memprintf(&msg, "_send_status PROC_O_READY %d\n", getpid());
 	ha_notice(">>> WORKER: msg=%s\n", msg);
 	
@@ -3864,6 +3870,9 @@ int main(int argc, char **argv)
 
 	if (nb_oldpids)
 		nb_oldpids = tell_old_pids(oldpids_sig);
+
+
+
 	
 
 
