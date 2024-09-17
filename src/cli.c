@@ -2495,7 +2495,6 @@ static int _send_status(char **args, char *payload, struct appctx *appctx, void 
 
 	ha_notice(">>> %s: proc->pid=%d, opts=0x%08x\n", __func__, proc->pid, proc->options);
 	setenv("HAPROXY_LOAD_SUCCESS", "1", 1); // parsed in cli_io_handler_show_loadstatus
-	nb_oldpids = tell_old_pids(oldpids_sig);
 
 	return 1;
 }

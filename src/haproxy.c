@@ -2085,7 +2085,6 @@ static void init(int argc, char **argv)
 
 	if (global.mode & MODE_MWORKER) {
 		struct mworker_proc *tmproc;
-		struct mworker_proc *proc;
 		
 		setenv("HAPROXY_MWORKER", "1", 1);
 
@@ -2195,7 +2194,9 @@ static void init(int argc, char **argv)
 				
 				if ((child->options & PROC_O_TYPE_WORKER) && (child->options & PROC_O_INIT)) {
 					
-					child->ipc_fd[0] = -1; // set -1 at master side
+					//child->ipc_fd[0] = -1; // set -1 at master side
+					//fd_delete(child->ipc_fd[0]);
+					close(child->ipc_fd[0]);
 					
 					break;
 				}
@@ -2230,7 +2231,9 @@ static void init(int argc, char **argv)
 					/* at this step the fd is bound for the worker, set it to -1 so
 					 * it could be close in case of errors in mworker_cleanup_proc() */
 					child->ipc_fd[1] = -1; // unregister listener and then set -1 ??
-
+					//fd_delete(child->ipc_fd[1]);
+					//close(child->ipc_fd[1]); ??
+					
 					/* add mworker_proxy listener to child's copy of sockpair */
 					memprintf(&sock_name, "sockpair@%d", child->ipc_fd[0]);
 

@@ -769,8 +769,10 @@ static int cli_parse_reload(char **args, char *payload, struct appctx *appctx, v
 		strm = sc_strm(scb);
 	if (strm && strm->scf)
 		conn = sc_conn(strm->scf);
-	if (conn)
+	if (conn) {
+		ha_notice("%s: get conn with proto=%s\n", __func__, conn->ctrl->name);
 		fd = conn_fd(conn);
+	}
 
 	ha_notice(">>>%s: send conn fd=%d to proc_self->ipc_fd[0]=%d\n", __func__, fd, proc_self->ipc_fd[0]);
 	/* Send the FD of the current session to the "cli_reload" FD, which won't be polled */
