@@ -255,7 +255,7 @@ int protocol_pause_all(void)
 	struct protocol *proto;
 	struct listener *listener;
 	int err;
-
+	//ha_notice("%s\n", __func__);
 	err = 0;
 	HA_SPIN_LOCK(PROTO_LOCK, &proto_lock);
 	list_for_each_entry(proto, &protocols, list) {
@@ -277,7 +277,7 @@ int protocol_resume_all(void)
 	struct protocol *proto;
 	struct listener *listener;
 	int err;
-
+	//ha_notice("%s\n", __func__);
 	err = 0;
 	HA_SPIN_LOCK(PROTO_LOCK, &proto_lock);
 	list_for_each_entry(proto, &protocols, list) {

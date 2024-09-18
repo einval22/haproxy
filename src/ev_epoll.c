@@ -282,6 +282,7 @@ static int init_epoll_per_thread()
 		epoll_fd[tid] = epoll_create(global.maxsock + 1);
 		if (epoll_fd[tid] < 0)
 			goto fail_fd;
+		//ha_notice(">>>%s: CREATED fd=%d\n", __func__, epoll_fd[tid]);
 	}
 
 	/* we may have to unregister some events initially registered on the
@@ -300,8 +301,11 @@ static int init_epoll_per_thread()
 
 static void deinit_epoll_per_thread()
 {
-	if (MAX_THREADS > 1 && tid)
+	if (MAX_THREADS > 1 && tid) {
+		//ha_notice(">>>%s: CLOSED fd=%d\n", __func__, epoll_fd[tid]);
 		close(epoll_fd[tid]);
+		
+	}
 
 	ha_free(&epoll_events);
 }
@@ -316,6 +320,7 @@ static int _do_init(struct poller *p)
 	p->private = NULL;
 
 	epoll_fd[tid] = epoll_create(global.maxsock + 1);
+	//ha_notice(">>>%s: CREATED fd=%d\n", __func__, epoll_fd[tid]);
 	if (epoll_fd[tid] < 0)
 		goto fail_fd;
 
@@ -336,7 +341,9 @@ static int _do_init(struct poller *p)
 static void _do_term(struct poller *p)
 {
 	if (epoll_fd[tid] >= 0) {
+		//ha_notice(">>>%s: CLOSED fd=%d\n", __func__, epoll_fd[tid]);
 		close(epoll_fd[tid]);
+		
 		epoll_fd[tid] = -1;
 	}
 
@@ -355,7 +362,10 @@ static int _do_test(struct poller *p)
 	fd = epoll_create(global.maxsock + 1);
 	if (fd < 0)
 		return 0;
+	//ha_notice(">>>%s: CREATED fd=%d\n", __func__, fd);
+	//ha_notice(">>>%s: CLOSED fd=%d\n", __func__, fd);
 	close(fd);
+	
 	return 1;
 }
 
@@ -367,11 +377,14 @@ static int _do_test(struct poller *p)
  */
 static int _do_fork(struct poller *p)
 {
-	if (epoll_fd[tid] >= 0)
+	if (epoll_fd[tid] >= 0) {
+		//ha_notice(">>>%s: CLOSED fd=%d\n", __func__, epoll_fd[tid]);
 		close(epoll_fd[tid]);
+	}
 	epoll_fd[tid] = epoll_create(global.maxsock + 1);
 	if (epoll_fd[tid] < 0)
 		return 0;
+	//ha_notice(">>>%s: CREADTED fd=%d\n", __func__, epoll_fd[tid]);
 	return 1;
 }
 

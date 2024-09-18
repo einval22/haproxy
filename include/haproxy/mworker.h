@@ -41,7 +41,7 @@ int mworker_child_nb(void);
 
 int mworker_ext_launch_all(void);
 
-void mworker_kill_max_reloads(int sig);
+void mworker_kill_max_reloads(int sig, int current_worker_pid);
 
 struct mworker_proc *mworker_proc_new();
 void mworker_free_child(struct mworker_proc *);

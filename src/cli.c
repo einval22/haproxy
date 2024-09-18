@@ -2464,39 +2464,64 @@ static int cli_parse_simple(char **args, char *payload, struct appctx *appctx, v
 	return 1;
 }
 
-
 static int _send_status(char **args, char *payload, struct appctx *appctx, void *private)
 {
 
-	struct mworker_proc *proc;
-
-	BUG_ON((strcmp(args[0], "_send_status") != 0), "Triggered in _send_status by unsupported command name.\n");
 	ha_notice(">>>>%s: %s\n", __func__, args[0]);
-	char *status = args[1];
-	int pid = atoi(args[2]);
 	ha_notice(">>>>%s: %s\n", __func__, args[1]);
 	ha_notice(">>>>%s: %s\n", __func__, args[2]);
 	ha_notice(">>>>%s: payload=%s\n", __func__, payload);
 
-	if  (strcmp(status, "PROC_O_READY") == 0) {
-		list_for_each_entry(proc, &proc_list, list) {
-			ha_notice(">>> %s: proc->pid=%d, opts=0x%08x, proc->ipc_fd_0=%d, proc->ipc_fd_1=%d\n", __func__, proc->pid, proc->options, proc->ipc_fd[0], proc->ipc_fd[1]);
-			
-			if (proc->pid == pid) {
-				proc->options &= ~PROC_O_INIT;
-				//proc->options |= PROC_O_READY;
+	BUG_ON((strcmp(args[0], "_send_status") != 0), "Triggered in _send_status by unsupported command name.\n");
+	BUG_ON((strcmp(args[1], "PROC_O_READY") != 0), "Triggered in _send_status, expect to receive only status PROC_O_READY.\n");
+	BUG_ON((!args[2]), "Triggered in _send_status, expect to receive worker PID.\n");
+	
+	struct mworker_proc *proc;
+	int pid = atoi(args[2]);
 
-				break;
-			}
-		}
-	} else {
-		ha_warning(">>> Bad status: %s\n", status);
+	list_for_each_entry(proc, &proc_list, list) {
+		ha_notice(">>> %s: proc->pid=%d, opts=0x%08x, proc->ipc_fd_0=%d, proc->ipc_fd_1=%d\n", __func__, proc->pid, proc->options, proc->ipc_fd[0], proc->ipc_fd[1]);
+		/* update status of the new worker */
+		if (proc->pid == pid) {
+			proc->options &= ~PROC_O_INIT;
+			break;
+		}	
 	}
+	
 
-	ha_notice(">>> %s: proc->pid=%d, opts=0x%08x\n", __func__, proc->pid, proc->options);
+	ha_notice(">>> %s: updated proc->pid=%d, opts=0x%08x\n", __func__, proc->pid, proc->options);
 	setenv("HAPROXY_LOAD_SUCCESS", "1", 1); // parsed in cli_io_handler_show_loadstatus
 
 	return 1;
+}
+
+static int _kill_max_reloads(char **args, char *payload, struct appctx *appctx, void *private)
+{
+
+	//struct mworker_proc *proc;
+	ha_notice(">>>>%s: %s\n", __func__, args[0]);
+	ha_notice(">>>>%s: %s\n", __func__, args[1]);
+	ha_notice(">>>>%s: %s\n", __func__, args[2]);
+	ha_notice(">>>>%s: payload=%s\n", __func__, payload);
+
+	BUG_ON((strcmp(args[0], "_kill_max_reloads") != 0), "Triggered in _kill_max_reloads by unsupported command name.\n");
+	int current_worker_pid = atoi(args[1]);
+
+	/* check that it was send by new worker at READY state */
+	/*
+	list_for_each_entry(proc, &proc_list, list) {
+		ha_notice(">>> %s: proc->pid=%d, opts=0x%08x, proc->ipc_fd_0=%d, proc->ipc_fd_1=%d\n", __func__, proc->pid, proc->options, proc->ipc_fd[0], proc->ipc_fd[1]);
+		
+		if ((proc->pid == current_worker_pid) && !(proc->options & PROC_O_INIT)) {
+			mworker_kill_max_reloads(SIGTERM, current_worker_pid);
+			break;
+		} 
+	}
+	*/
+	mworker_kill_max_reloads(SIGTERM, current_worker_pid);
+
+	return 1;
+
 }
 
 void pcli_write_prompt(struct stream *s)
@@ -3346,7 +3371,7 @@ int mworker_cli_proxy_create()
 		int port1, port2, port;
 		struct protocol *proto;
 
-		ha_notice(">>> %s; proc pid=%d, opts=0x%08x; fd_0=%d, fd_1=%d\n", __func__, child->pid, child->options, child->ipc_fd[0], child->ipc_fd[1]);
+		//ha_notice(">>> %s; proc pid=%d, opts=0x%08x; fd_0=%d, fd_1=%d\n", __func__, child->pid, child->options, child->ipc_fd[0], child->ipc_fd[1]);
 
 		/* only the workers support the master CLI */
 		if (!(child->options & PROC_O_TYPE_WORKER))
@@ -3417,7 +3442,7 @@ error_proxy:
 /*
  * Create a new listener for the master CLI proxy
  */
-struct bind_conf *mworker_cli_proxy_new_listener(char *line)
+struct bind_conf *mworker_cli_master_proxy_new_listener(char *line)
 {
 	struct bind_conf *bind_conf;
 	struct listener *l;
@@ -3501,7 +3526,7 @@ struct bind_conf *mworker_cli_proxy_new_listener(char *line)
 	/* Pin master CLI on the first thread of the first group only */
 	thread_set_pin_grp1(&bind_conf->thread_set, 1);
 
-	ha_notice(">>> %s allocated %s bindconf with FE: %s\n", __func__, bind_conf->file, bind_conf->frontend->id);
+	//ha_notice(">>> %s allocated %s bindconf with FE: %s\n", __func__, bind_conf->file, bind_conf->frontend->id);
 
 	list_for_each_entry(l, &bind_conf->listeners, by_bind) {
 		l->rx.flags |= RX_F_MWORKER; /* we are keeping this FD in the master */
@@ -3525,18 +3550,19 @@ err:
  * Create a new CLI socket using a socketpair for a worker process
  * <mworker_proc> is the process structure, and <proc> is the process number
  */
-int mworker_cli_sockpair_new(struct mworker_proc *worker_proc, int proc)
+int mworker_cli_global_proxy_new_listener(struct mworker_proc *worker_proc)
 {
 	struct bind_conf *bind_conf;
 	struct listener *l;
 	char *path = NULL;
 	char *err = NULL;
 
-	
+	/*
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, worker_proc->ipc_fd) < 0) {
 		ha_alert("Cannot create worker socketpair.\n");
 		return -1;
 	}
+	*/
 
 	/* XXX: we might want to use a separate frontend at some point */
 	if (!global.cli_fe) {
@@ -3561,7 +3587,7 @@ int mworker_cli_sockpair_new(struct mworker_proc *worker_proc, int proc)
 
 	if (!str2listener(path, global.cli_fe, bind_conf, "master-socket", 0, &err)) {
 		free(path);
-		ha_alert("Cannot create a CLI sockpair listener for process #%d\n", proc);
+		ha_alert("Cannot create a CLI sockpair listener for process #%d\n", getpid());
 		goto error;
 	}
 	ha_free(&path);
@@ -3573,8 +3599,8 @@ int mworker_cli_sockpair_new(struct mworker_proc *worker_proc, int proc)
 	/* Pin master CLI on the first thread of the first group only */
 	thread_set_pin_grp1(&bind_conf->thread_set, 1);
 
-	ha_notice(">>> %s NEW SOCKPAIR: 0=%d, 1=%d\n", __func__, worker_proc->ipc_fd[0], worker_proc->ipc_fd[1]);
-	ha_notice(">>> %s allocated new bindconf %s with FE %s\n", __func__, bind_conf->file, bind_conf->frontend->id);
+	//ha_notice(">>> %s NEW SOCKPAIR: 0=%d, 1=%d\n", __func__, worker_proc->ipc_fd[0], worker_proc->ipc_fd[1]);
+	//ha_notice(">>> %s allocated new bindconf %s with FE %s\n", __func__, bind_conf->file, bind_conf->frontend->id);
 	list_for_each_entry(l, &bind_conf->listeners, by_bind) {
 		HA_ATOMIC_INC(&unstoppable_jobs);
 		/* it's a sockpair but we don't want to keep the fd in the master */
@@ -3638,6 +3664,7 @@ static struct cli_kw_list cli_kws = {{ },{
 	{ { "user", NULL },                      "user                                    : lower the level of the current CLI session to user",      cli_parse_set_lvl, NULL, NULL, NULL, ACCESS_MASTER},
 	{ { "wait", NULL },                      "wait {-h|<delay_ms>} cond [args...]     : wait the specified delay or condition (-h to see list)",  cli_parse_wait, cli_io_handler_wait, cli_release_wait, NULL },
 	{ { "_send_status", NULL },              NULL,  											      _send_status, NULL, NULL, NULL, ACCESS_MASTER_ONLY },
+	{ { "_kill_max_reloads", NULL },         NULL,  											      _kill_max_reloads, NULL, NULL, NULL, ACCESS_MASTER_ONLY },
 	{{},}
 }};
 

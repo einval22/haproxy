@@ -683,9 +683,12 @@ int tell_old_pids(int sig)
 {
 	int p;
 	int ret = 0;
-	for (p = 0; p < nb_oldpids; p++)
-		if (kill(oldpids[p], sig) == 0)
+	for (p = 0; p < nb_oldpids; p++) {
+		if (kill(oldpids[p], sig) == 0) {
+			ha_warning("%s: send sig %d to %d\n", __func__, sig, oldpids[p]);
 			ret++;
+		}
+	}
 	return ret;
 }
 
@@ -780,6 +783,7 @@ static void mworker_reexec(int hardreload)
 
 	/* add -sf <PID>*  to argv */
 	if (mworker_child_nb() > 0) {
+		ha_notice("%s: NB child=%d\n", __func__, mworker_child_nb());
 		struct mworker_proc *child;
 
 		if (hardreload)
@@ -788,8 +792,11 @@ static void mworker_reexec(int hardreload)
 			next_argv[next_argc++] = "-sf";
 
 		list_for_each_entry(child, &proc_list, list) {
-			if (!(child->options & PROC_O_LEAVING) && (child->options & PROC_O_TYPE_WORKER))
+			if ((child->options & PROC_O_LEAVING) && (child->options & PROC_O_TYPE_WORKER)) {
+				
 				current_child = child;
+				ha_notice("%s: >>> current_child=%d\n", __func__, current_child->pid);
+			}
 
 			if (!(child->options & (PROC_O_TYPE_WORKER|PROC_O_TYPE_PROG)) || child->pid <= -1)
 				continue;
@@ -804,6 +811,7 @@ static void mworker_reexec(int hardreload)
 		if ((next_argv[next_argc++] = memprintf(&msg, "sockpair@%d", current_child->ipc_fd[0])) == NULL)
 			goto alloc_error;
 		msg = NULL;
+		ha_notice("%s: current_child=%d, set -x\n", __func__, current_child->pid);
 	}
 
 	if (x_off) {
@@ -2110,11 +2118,12 @@ static void init(int argc, char **argv)
 		}
 		tmproc->options |= (PROC_O_TYPE_WORKER | PROC_O_INIT);                                                                                                                                                                                                                                                                                                                                    ; /* worker */
 
-		// tmproc->ipc_fd[1] is attached to global.cli_fe
-		if (mworker_cli_sockpair_new(tmproc, 0) < 0) {
+		// create sockpair to copy via fork() in master and worker processes
+		if (socketpair(AF_UNIX, SOCK_STREAM, 0, tmproc->ipc_fd) < 0) {
+			ha_alert("Cannot create worker socketpair.\n");
 			exit(EXIT_FAILURE);
 		}
-		
+
 
 		ha_notice(">>>%s: BEFORE FORK: added new worker struct to list pid=%d, opts=0x%08x, fd_0=%d, fd_1=%d\n", __func__, tmproc->pid, tmproc->options, tmproc->ipc_fd[0],  tmproc->ipc_fd[1]);
 
@@ -2191,22 +2200,21 @@ static void init(int argc, char **argv)
 			ha_random_jump96(1);
 
 			list_for_each_entry(child, &proc_list, list) {
-				
 				if ((child->options & PROC_O_TYPE_WORKER) && (child->options & PROC_O_INIT)) {
-					
-					//child->ipc_fd[0] = -1; // set -1 at master side
-					//fd_delete(child->ipc_fd[0]);
 					close(child->ipc_fd[0]);
-					
+					child->ipc_fd[0] = -1;
+					/* attach listener to GLOBAL proxy on child->ipc_fd[1] */
+					if (mworker_cli_global_proxy_new_listener(child) < 0) {
+						exit(EXIT_FAILURE);
+					}
 					break;
 				}
 			}
-
 			break;
 		default:
 			/* in parent */
 			//ha_notice("New worker (%d) forked\n", worker_pid);
-			ha_notice("MASTER: NEW WORKER (%d) forked\n", worker_pid);
+			ha_notice(">>> MASTER: NEW WORKER (%d) forked\n", worker_pid);
 			master = 1;
 			atexit_flag = 1;
 			//atexit(exit_on_failure);
@@ -2224,20 +2232,21 @@ static void init(int argc, char **argv)
 			list_for_each_entry(child, &proc_list, list) {
 				//ha_notice(">>>%s: MASTER: proc->pid=%d, opts=0x%08x, proc->ipc_fd_0=%d, proc->ipc_fd_1=%d\n", __func__, child->pid, child->options, child->ipc_fd[0], child->ipc_fd[1]);
 				
-				if (child->reloads == 0 && child->options & PROC_O_TYPE_WORKER && child->pid == -1) {
+				if ((child->options & PROC_O_TYPE_WORKER) && (child->options & PROC_O_INIT)) {
 					child->timestamp = date.tv_sec;
 					child->pid = worker_pid;
 					child->version = strdup(haproxy_version);
 					/* at this step the fd is bound for the worker, set it to -1 so
 					 * it could be close in case of errors in mworker_cleanup_proc() */
-					child->ipc_fd[1] = -1; // unregister listener and then set -1 ??
+					close(child->ipc_fd[1]); // unregister listener and then set -1 ??
+					child->ipc_fd[1] = -1;
 					//fd_delete(child->ipc_fd[1]);
 					//close(child->ipc_fd[1]); //??
 					
 					/* add mworker_proxy listener to child's copy of sockpair */
 					memprintf(&sock_name, "sockpair@%d", child->ipc_fd[0]);
 
-					mworker_cli_proxy_new_listener(sock_name);
+					mworker_cli_master_proxy_new_listener(sock_name);
 					ha_free(&sock_name);
 					
 					break;
@@ -3493,7 +3502,8 @@ int main(int argc, char **argv)
 	 * That's at most 1 second. We only send a signal to old pids
 	 * if we cannot grab at least one port.
 	 */
-	retry = MAX_START_RETRIES;
+	ha_warning("%s: try to bind new worker, nb_oldpids=%d\n", __func__, nb_oldpids);
+	retry = MAX_START_RETRIES; // 200
 	err = ERR_NONE;
 	while (retry >= 0) {
 		struct timeval w;
@@ -3563,17 +3573,7 @@ int main(int argc, char **argv)
 
 
 
-	/* Send a SIGTERM to workers who have a too high reloads number.
-	 * master=1 means that fork() was done before. So, at this stage we already
-	 * have at least one new worker with reloads=0, which is bound to sockets.
-	 */
-	// TODO: do via send cmd
-	if (master)
-		mworker_kill_max_reloads(SIGTERM);
 
-
-	if (nb_oldpids && !master)
-		nb_oldpids = tell_old_pids(oldpids_sig);
 
 	/* Note that any error at this stage will be fatal because we will not
 	 * be able to restart the old pids.
@@ -3736,8 +3736,7 @@ int main(int argc, char **argv)
 		global.mode |= MODE_QUIET; /* ensure that we won't say anything from now */
 	}
 	pid = getpid(); /* update child's pid */
-	if (!master) /* in mworker mode we don't want a new pgid for the children */
-		setsid();
+	setsid(); /* in mworker mode we don't want a new pgid for the children */
 	fork_poller();
 
 	/* pass through every cli socket, and check if it's bound to
@@ -3827,19 +3826,6 @@ int main(int argc, char **argv)
 	/* when multithreading we need to let only the thread 0 handle the signals */
 	haproxy_unblock_signals();
 
-	/* send PROC_O_READY to remove PROC_O_INIT */
-
-	int sock_pair[2];
-	char *msg = NULL;
-
-	if (socketpair(PF_UNIX, SOCK_STREAM, 0, sock_pair) == -1) {
-		ha_warning("socketpair(): Cannot create socketpair to update state\n");
-		deinit_and_exit(-1);
-	}
-	ha_notice(">>>%s:WORKER: sp_1=%d, sp_2=%d\n", __func__, sock_pair[0], sock_pair[1] );
-	//ha_notice(">>>%s: proc_self=%p, proc_self->options=0x%08x, proc_self->pid=%d, proc_self->ipc_fd[0]=%d, proc_self->ipc_fd[1]=%d, sp_1=%d, sp_2=%d\n",
-	//		__func__, proc_self, proc_self->options, proc_self->pid, proc_self->ipc_fd[0],proc_self->ipc_fd[1],sock_pair[0], sock_pair[1] );
-	
 	struct mworker_proc *child;
 	list_for_each_entry(child, &proc_list, list) {
 		ha_notice(">>>%s: WORKER: proc at %p, proc pid=%d, proc->options=0x%08x, proc->ipc_fd[0]=%d, proc->ipc_fd[1]=%d\n", __func__, child, child->pid, child->options, child->ipc_fd[0],child->ipc_fd[1]);
@@ -3849,7 +3835,16 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* send PROC_O_READY to remove PROC_O_INIT */
+	int sock_pair[2];
+	char *msg = NULL;
 
+	if (socketpair(PF_UNIX, SOCK_STREAM, 0, sock_pair) == -1) {
+		ha_warning("socketpair(): Cannot create socketpair to update state\n");
+		deinit_and_exit(-1);
+	}
+	ha_notice(">>>%s:WORKER: sp_1=%d, sp_2=%d\n", __func__, sock_pair[0], sock_pair[1] );
+	
 	// cli.fe listener is on child->ipc_fd[1]
 	ha_notice(">>> WORKER: send %d to %d\n",  sock_pair[0], child->ipc_fd[1]);
 	if (send_fd_uxst(child->ipc_fd[1], sock_pair[0]) == -1) {
@@ -3859,8 +3854,8 @@ int main(int argc, char **argv)
 		exit(-1);
 		
 	}
-	
 	close(sock_pair[0]);
+
 	memprintf(&msg, "_send_status PROC_O_READY %d\n", getpid());
 	ha_notice(">>> WORKER: msg=%s\n", msg);
 	
@@ -3868,15 +3863,49 @@ int main(int argc, char **argv)
 		ha_warning("Failed to send READY status to master!\n");
 		exit(-1);
 	}
-	ha_free(&msg);
+	/* now close "connnection" sockpair with master */
 	close(sock_pair[1]);
-
-	if (nb_oldpids)
+	ha_free(&msg);
+	
+	/* finish or terminate the paused old worker */
+	if (nb_oldpids) {
 		nb_oldpids = tell_old_pids(oldpids_sig);
 
+	}
 
+	/* TODO put all this in tell_old_pids to reduce num signals to send and to optim 
+		ha_notice(">>> WORKER: can check and terminate max reloads\n");
+		int sock_pair_kill[2];
+		char *msg1 = NULL;
 
-	
+		if (socketpair(PF_UNIX, SOCK_STREAM, 0, sock_pair_kill) == -1) {
+			ha_warning("socketpair(): Cannot create socketpair to update state\n");
+			deinit_and_exit(-1);
+		}
+		ha_notice(">>>%s:WORKER: sp_0=%d, sp_1=%d\n", __func__, sock_pair_kill[0], sock_pair_kill[1] );
+
+		// cli.fe listener is on child->ipc_fd[1]
+		ha_notice(">>> WORKER: send %d to %d\n",  sock_pair_kill[0], child->ipc_fd[1]);
+		if (send_fd_uxst(child->ipc_fd[1], sock_pair_kill[0]) == -1) {
+			ha_alert("socketpair: Cannot transfer the fd %d over sockpair@%d. Exiting...\n", sock_pair_kill[0], child->ipc_fd[0]);
+			close(sock_pair_kill[0]);
+			close(sock_pair_kill[1]);
+			exit(-1);
+			
+		}
+		close(sock_pair_kill[0]);
+
+		/* Now we can send a SIGTERM to workers who have a too high reloads number.
+		
+		memprintf(&msg1, "_kill_max_reloads %d\n", getpid());
+		ha_notice(">>> WORKER: msg1=%s\n", msg1);
+		if (send(sock_pair_kill[1], msg1, strlen(msg1), 0) != strlen(msg1)) {
+			ha_warning("Failed to terminate workers, which have too high reloads number, please stop them manually or restart\n");
+			
+		}
+		close(sock_pair_kill[1]);
+		ha_free(&msg1);
+	*/
 
 
 #if defined(USE_SYSTEMD)

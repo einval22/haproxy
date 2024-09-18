@@ -67,13 +67,14 @@ static void mworker_kill(int sig)
 	}
 }
 
-void mworker_kill_max_reloads(int sig)
+void mworker_kill_max_reloads(int sig, int current_worker_pid)
 {
 	struct mworker_proc *child;
 
 	list_for_each_entry(child, &proc_list, list) {
+		ha_notice(">>> %s: proc->pid=%d, opts=0x%08x, child->reloads=%d max_reloads=%d\n", __func__, child->pid, child->options, child->reloads, max_reloads);
 		if (max_reloads != -1 && (child->options & PROC_O_TYPE_WORKER) &&
-		    (child->pid > 0) && (child->reloads > max_reloads))
+		    (child->pid > 0) && (child->pid != current_worker_pid) && (child->reloads > max_reloads))
 			kill(child->pid, sig);
 	}
 }
@@ -140,10 +141,11 @@ void mworker_proc_list_to_env()
 		setenv("HAPROXY_PROCESSES", msg, 1);
 
 	list_for_each_entry(child, &proc_list, list) {
-		if (child->reloads > minreloads && !(child->options & PROC_O_TYPE_MASTER)) {
-		//if (!(child->options & PROC_O_TYPE_MASTER)) {
+		//if (child->reloads > minreloads && !(child->options & PROC_O_TYPE_MASTER)) {
+		if (child->options & PROC_O_TYPE_WORKER) {
 			child->options |= PROC_O_LEAVING;
 		}
+		ha_notice("%s: proc->pid=%d, opts=0x%08x\n", __func__, child->pid, child->options);
 	}
 
 
@@ -389,7 +391,7 @@ restart_wait:
 				continue;
 
 			LIST_DELETE(&child->list);
-			ha_notice(">>> %s: pid=%d EXITED\n", __func__, exitpid);
+			ha_notice(">>> %s: pid=%d EXITING\n", __func__, exitpid);
 			//close(child->ipc_fd[0]); // dispatch to each case (O_LEAVING, O_INIT)
 			childfound = 1;
 			break;
@@ -417,17 +419,17 @@ restart_wait:
 				}
 			}
 			
-			/* clean ipc_fd and drop server */
-			//if (child->ipc_fd[0] > -1)
-			//	close(child->ipc_fd[0]);
-			//if (child->ipc_fd[1] > -1)
-			//	close(child->ipc_fd[1]);
+			/* drop server */
 			if (child->srv) {
 				/* only exists if we created a master CLI listener */
 				srv_drop(child->srv);
 			}
-			ha_notice(">>> %s: child pid=%d, opts=0x%08x, EXITED; will delete and close IPC child->ipc_fd[0]=%d\n", __func__, exitpid, child->options, child->ipc_fd[0]);
+			ha_notice(">>> %s: child pid=%d, opts=0x%08x, EXITED; will delete  IPC child->ipc_fd[0]=%d\n", __func__, exitpid, child->options, child->ipc_fd[0]);
+			/* del fd from poller fdtab and close it */
 			fd_delete(child->ipc_fd[0]);
+			child->ipc_fd[0] = -1;
+			mworker_free_child(child);
+			child = NULL;
 			
 			/* when worker fails during the first startup, no previous workers with state PROC_O_LEAVING */
 			if ((proc_self->options & PROC_O_TYPE_MASTER) && (proc_self->reloads == 0))
@@ -889,7 +891,7 @@ void mworker_create_master_cli(void)
 
 		list_for_each_entry_safe(c, it, &mworker_cli_conf, list) {
 
-			if (mworker_cli_proxy_new_listener(c->s) == NULL) {
+			if (mworker_cli_master_proxy_new_listener(c->s) == NULL) {
 				ha_alert("Can't create the master's CLI.\n");
 				exit(EXIT_FAILURE);
 			}
@@ -918,13 +920,13 @@ void mworker_create_master_cli(void)
 		memprintf(&path, "sockpair@%d", proc_self->ipc_fd[1]);
 		
 		//ha_notice(">>> %s after: proc_self->pid=%d, opts=0x%08x, proc_self->ipc_fd_0=%d, proc_self->ipc_fd_1=%d\n", __func__, proc_self->pid, proc_self->options, proc_self->ipc_fd[0], proc_self->ipc_fd[1]);
-		mcli_reload_bind_conf = mworker_cli_proxy_new_listener(path);
+		mcli_reload_bind_conf = mworker_cli_master_proxy_new_listener(path);
 		if (mcli_reload_bind_conf == NULL) {
 			ha_alert("Can't create the mcli_reload listener.\n");
 			exit(EXIT_FAILURE);
 		}
 
-		ha_notice(">>> %s: proc_self->pid=%d, opts=0x%08x, proc_self->ipc_fd_0=%d, proc_self->ipc_fd_1=%d\n", __func__, proc_self->pid, proc_self->options, proc_self->ipc_fd[0], proc_self->ipc_fd[1]);
+		//ha_notice(">>> %s: proc_self->pid=%d, opts=0x%08x, proc_self->ipc_fd_0=%d, proc_self->ipc_fd_1=%d\n", __func__, proc_self->pid, proc_self->options, proc_self->ipc_fd[0], proc_self->ipc_fd[1]);
 		ha_free(&path);
 	}
 }

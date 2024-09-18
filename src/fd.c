@@ -355,8 +355,11 @@ void _fd_delete_orphan(int fd)
 	/* perform the close() call last as it's what unlocks the instant reuse
 	 * of this FD by any other thread.
 	 */
-	if (!fd_disown)
+	if (!fd_disown) {
+		//ha_notice("=== %s: CLOSED fd=%d\n", __func__, fd);
 		close(fd);
+	}
+	
 	_HA_ATOMIC_DEC(&ha_used_fds);
 }
 
@@ -990,6 +993,7 @@ void my_closefrom(int start)
 				continue; /* already closed */
 
 			fd = poll_events[idx].fd;
+			ha_notice("=== %s: CLOSED fd=%d\n", __func__, fd);
 			close(fd);
 		}
 		start = next;
