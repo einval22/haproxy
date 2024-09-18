@@ -2232,7 +2232,7 @@ static void init(int argc, char **argv)
 					 * it could be close in case of errors in mworker_cleanup_proc() */
 					child->ipc_fd[1] = -1; // unregister listener and then set -1 ??
 					//fd_delete(child->ipc_fd[1]);
-					//close(child->ipc_fd[1]); ??
+					//close(child->ipc_fd[1]); //??
 					
 					/* add mworker_proxy listener to child's copy of sockpair */
 					memprintf(&sock_name, "sockpair@%d", child->ipc_fd[0]);
@@ -3853,10 +3853,10 @@ int main(int argc, char **argv)
 	// cli.fe listener is on child->ipc_fd[1]
 	ha_notice(">>> WORKER: send %d to %d\n",  sock_pair[0], child->ipc_fd[1]);
 	if (send_fd_uxst(child->ipc_fd[1], sock_pair[0]) == -1) {
-		ha_alert("socketpair: Cannot transfer the fd %d over sockpair@%d\n", sock_pair[0], child->ipc_fd[0]);
+		ha_alert("socketpair: Cannot transfer the fd %d over sockpair@%d. Exiting...\n", sock_pair[0], child->ipc_fd[0]);
 		close(sock_pair[0]);
 		close(sock_pair[1]);
-		deinit_and_exit(-1);
+		exit(-1);
 		
 	}
 	
@@ -3866,7 +3866,7 @@ int main(int argc, char **argv)
 	
 	if (send(sock_pair[1], msg, strlen(msg), 0) != strlen(msg)) {
 		ha_warning("Failed to send READY status to master!\n");
-		deinit_and_exit(-1);
+		exit(-1);
 	}
 	ha_free(&msg);
 	close(sock_pair[1]);
