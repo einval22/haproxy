@@ -356,7 +356,7 @@ void _fd_delete_orphan(int fd)
 	 * of this FD by any other thread.
 	 */
 	if (!fd_disown) {
-		//ha_notice("=== %s: CLOSED fd=%d\n", __func__, fd);
+		ha_notice("=== %s: CLOSED fd=%d\n", __func__, fd);
 		close(fd);
 	}
 	
