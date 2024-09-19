@@ -2227,24 +2227,24 @@ static void apply_master_worker_mode()
 
 }
 
-static void bind_listeners()
+static void get_listeners_fd()
 {
-	int err, retry;
-
 	/* Try to get the listeners FD from the previous process using
 	 * _getsocks on the stat socket, it must never been done in wait mode
 	 * and check mode
 	 */
-	if (old_unixsocket &&
-	    !(global.mode & (MODE_MWORKER|MODE_CHECK|MODE_CHECK_CONDITION))) {
-		if (strcmp("/dev/null", old_unixsocket) != 0) {
-			if (sock_get_old_sockets(old_unixsocket) != 0) {
-				ha_alert("Failed to get the sockets from the old process!\n");
-				if (!(global.mode & MODE_MWORKER))
-					exit(1);
-			}
+	
+	if (strcmp("/dev/null", old_unixsocket) != 0) {
+		if (sock_get_old_sockets(old_unixsocket) != 0) {
+			ha_alert("Failed to get the sockets from the old process!\n");
+			exit(1);
 		}
 	}
+}
+
+static void bind_listeners()
+{
+	int err, retry;
 
 	/* We will loop at most 100 times with 10 ms delay each time.
 	 * That's at most 1 second. We only send a signal to old pids
@@ -2286,22 +2286,6 @@ static void bind_listeners()
 		protocol_unbind_all(); /* cleanup everything we can */
 		exit(1);
 	}
-
-	if (!master && listeners == 0) {
-		ha_alert("[%s.main()] No enabled listener found (check for 'bind' directives) ! Exiting.\n", progname);
-		/* Note: we don't have to send anything to the old pids because we
-		 * never stopped them. */
-		exit(1);
-	}
-
-	/* Ok, all listeners should now be bound, close any leftover sockets
-	 * the previous process gave us, we don't need them anymore
-	 */
-	sock_drop_unused_old_sockets();
-
-	/* prepare pause/play signals */
-	signal_register_fct(SIGTTOU, sig_pause, SIGTTOU);
-	signal_register_fct(SIGTTIN, sig_listen, SIGTTIN);
 }
 
 
@@ -3039,6 +3023,74 @@ static void step_init_4()
 	ha_free(&global.pidfile);
 }
 
+static void run_master_in_wait_mode(int argc, char **argv)
+{
+	global.nbtgroups = 1;
+	global.nbthread = 1;
+	master=1;
+	/* master CLI */
+	mworker_create_master_cli();
+	step_init_2(argc, argv);
+	step_init_3();
+	if (protocol_bind_all(1) != 0) {
+		ha_alert("Master failed to bind MCLI\n");
+		exit(1);
+	}
+	
+	step_init_4();
+	// goto mworker_loop
+	run_master();
+}
+
+/* parse conf in disovery mode and set modes from config */
+static void read_cfg_in_discovery_mode(int argc, char **argv)
+{
+	struct cfgfile *cfg, *cfg_tmp;
+	int err;
+
+	usermsgs_clr("config");
+
+	/* load configs in memory and parse only global section (MODE_DISCOVERY) */
+	if (load_cfg(progname) < 0) {
+		if (getenv("HAPROXY_MWORKER_REEXEC") != NULL) {
+			ha_warning("Master failed to load new configuration and can't reload worker. Already running worker will be kept."
+				   "Please configuration file path and memory limits and reload %s\n", progname);
+			/* failed to load new conf, so setup master CLI for master side,
+			 * do some init steps and just enter in mworker_loop
+			 * to monitor the existed worker from previous start
+			 */
+			run_master_in_wait_mode(argc, argv);
+			/* never get there */	
+		} else
+			exit(1);
+	}
+	
+	ha_alert(">>>> Read only GLOBAL, mode=0x%08x\n", global.mode);
+	if (read_cfg(progname) < 0) {
+		list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
+			ha_free(&cfg->content);
+			ha_free(&cfg->filename);
+		}
+		if (getenv("HAPROXY_MWORKER_REEXEC") != NULL) {
+			ha_warning("Master failed to parse new configuration and can't reload worker. Already running worker will be kept. "
+				   "Please, check global section and memory limits and reload %s\n", progname);
+			/* failed to load new conf, so setup master CLI for master side,
+			 * do some init steps and just enter in mworker_loop
+			 * to monitor the existed worker from previous start
+			 */
+			run_master_in_wait_mode(argc, argv);
+			/* never get there */		
+		} else
+			exit(1);
+	}
+	global.mode &= ~MODE_DISCOVERY;
+
+	if (!LIST_ISEMPTY(&mworker_cli_conf) && !(arg_mode & MODE_MWORKER)) {
+		ha_alert("a master CLI socket was defined, but master-worker mode (-W) is not enabled.\n");
+		exit(EXIT_FAILURE);
+	}
+}
+
 void deinit(void)
 {
 	struct proxy *p = proxies_list, *p0;
@@ -3654,66 +3706,7 @@ int main(int argc, char **argv)
 	step_init_1();
 
 	/* parse conf in disovery mode and set modes from config */
-	usermsgs_clr("config");
-
-	/* load configs in memory and parse only global section (MODE_DISCOVERY) */
-	if (load_cfg(progname) < 0) {
-		if (getenv("HAPROXY_MWORKER_REEXEC") != NULL) {
-			ha_warning("Master failed to load new configuration and can't reload worker. Already running worker will be kept."
-				   "Please configuration file path and memory limits and reload %s\n", progname);
-			/* failed to load new conf, so setup master CLI for master side,
-			 * do some init steps and just enter in mworker_loop
-			 * to monitor the existed worker from previous start
-			 */
-			//prepare_master();
-			global.nbtgroups = 1;
-			global.nbthread = 1;
-			/* master CLI */
-			mworker_create_master_cli();
-			step_init_2(argc, argv);
-			step_init_3();
-			step_init_4();
-			run_master();
-			/* never get there */	
-		} else
-			exit(1);
-	}
-	
-	ha_alert(">>>> Read only GLOBAL\n");
-	if (read_cfg(progname) < 0) {
-		list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
-			ha_free(&cfg->content);
-			ha_free(&cfg->filename);
-		}
-		if (getenv("HAPROXY_MWORKER_REEXEC") != NULL) {
-			ha_warning("Master failed to parse new configuration and can't reload worker. Already running worker will be kept. "
-				   "Please, check global section and memory limits and reload %s\n", progname);
-			/* failed to load new conf, so setup master CLI for master side,
-			 * do some init steps and just enter in mworker_loop
-			 * to monitor the existed worker from previous start
-			 */
-			//prepare_master();
-			global.nbtgroups = 1;
-			global.nbthread = 1;
-			/* master CLI */
-			mworker_create_master_cli();
-			step_init_2(argc, argv);
-			step_init_3();
-			protocol_bind_all(1);
-			
-			step_init_4();
-			// goto mworker_loop
-			run_master();
-			/* never get there */		
-		} else
-			exit(1);
-	}
-	global.mode &= ~MODE_DISCOVERY;
-
-	if (!LIST_ISEMPTY(&mworker_cli_conf) && !(arg_mode & MODE_MWORKER)) {
-		ha_alert("a master CLI socket was defined, but master-worker mode (-W) is not enabled.\n");
-		exit(EXIT_FAILURE);
-	}
+	read_cfg_in_discovery_mode(argc, argv);
 
 	/* add entries for master and worker in proc_list, create sockpair,
 	 * that will be copied to both processes after master-worker fork to
@@ -3759,7 +3752,26 @@ int main(int argc, char **argv)
 	step_init_2(argc, argv);
 	/* register signals and bind to ports */
 	step_init_3();
+	if (!master && old_unixsocket)
+		get_listeners_fd();
+
 	bind_listeners();
+
+	if (!master && listeners == 0) {
+		ha_alert("[%s.main()] No enabled listener found (check for 'bind' directives) ! Exiting.\n", progname);
+		/* Note: we don't have to send anything to the old pids because we
+		 * never stopped them. */
+		exit(1);
+	}
+	/* Ok, all listeners should now be bound, close any leftover sockets
+	 * the previous process gave us, we don't need them anymore
+	 */
+	sock_drop_unused_old_sockets();
+
+	/* prepare pause/play signals */
+	signal_register_fct(SIGTTOU, sig_pause, SIGTTOU);
+	signal_register_fct(SIGTTIN, sig_listen, SIGTTIN);
+
 	step_init_4();
 
 	if (master) {
@@ -3767,6 +3779,7 @@ int main(int argc, char **argv)
 		/* never get there in master context */
 	}
 
+	// TODO: error path
 	/* end of initialization for standalone and worker modes */
 	if (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)) {
 		devnullfd = open("/dev/null", (O_RDWR | O_CLOEXEC), 0);
@@ -3936,37 +3949,40 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/* send PROC_O_READY to remove PROC_O_INIT */
-	int sock_pair[2];
-	char *msg = NULL;
+	if (global.mode & MODE_WORKER) {
+		// TODO: error path
+		/* send PROC_O_READY to remove PROC_O_INIT */
+		int sock_pair[2];
+		char *msg = NULL;
 
-	if (socketpair(PF_UNIX, SOCK_STREAM, 0, sock_pair) == -1) {
-		ha_warning("socketpair(): Cannot create socketpair to update state\n");
-		deinit_and_exit(-1);
-	}
-	ha_notice(">>>%s:WORKER: sp_1=%d, sp_2=%d\n", __func__, sock_pair[0], sock_pair[1] );
-	
-	// cli.fe listener is on child->ipc_fd[1]
-	ha_notice(">>> WORKER: send %d to %d\n",  sock_pair[0], child->ipc_fd[1]);
-	if (send_fd_uxst(child->ipc_fd[1], sock_pair[0]) == -1) {
-		ha_alert("socketpair: Cannot transfer the fd %d over sockpair@%d. Exiting...\n", sock_pair[0], child->ipc_fd[0]);
-		close(sock_pair[0]);
-		close(sock_pair[1]);
-		exit(-1);
+		if (socketpair(PF_UNIX, SOCK_STREAM, 0, sock_pair) == -1) {
+			ha_warning("socketpair(): Cannot create socketpair to update state\n");
+			deinit_and_exit(-1);
+		}
+		ha_notice(">>>%s:WORKER: sp_1=%d, sp_2=%d\n", __func__, sock_pair[0], sock_pair[1] );
 		
-	}
-	close(sock_pair[0]);
+		// cli.fe listener is on child->ipc_fd[1]
+		ha_notice(">>> WORKER: send %d to %d\n",  sock_pair[0], child->ipc_fd[1]);
+		if (send_fd_uxst(child->ipc_fd[1], sock_pair[0]) == -1) {
+			ha_alert("socketpair: Cannot transfer the fd %d over sockpair@%d. Exiting...\n", sock_pair[0], child->ipc_fd[0]);
+			close(sock_pair[0]);
+			close(sock_pair[1]);
+			exit(-1);
+			
+		}
+		close(sock_pair[0]);
 
-	memprintf(&msg, "_send_status PROC_O_READY %d\n", getpid());
-	ha_notice(">>> WORKER: msg=%s\n", msg);
-	
-	if (send(sock_pair[1], msg, strlen(msg), 0) != strlen(msg)) {
-		ha_warning("Failed to send READY status to master!\n");
-		exit(-1);
+		memprintf(&msg, "_send_status PROC_O_READY %d\n", getpid());
+		ha_notice(">>> WORKER: msg=%s\n", msg);
+		
+		if (send(sock_pair[1], msg, strlen(msg), 0) != strlen(msg)) {
+			ha_warning("Failed to send READY status to master!\n");
+			exit(-1);
+		}
+		/* now close "connnection" sockpair with master */
+		close(sock_pair[1]);
+		ha_free(&msg);
 	}
-	/* now close "connnection" sockpair with master */
-	close(sock_pair[1]);
-	ha_free(&msg);
 	
 	/* finish or terminate the paused old worker */
 	if (nb_oldpids) {
