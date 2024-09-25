@@ -700,17 +700,25 @@ int tell_old_pids(int sig)
 
 int delete_oldpid(int pid)
 {
-	int i;
+	int i, ret = 0;
 
 	for (i = 0; i < nb_oldpids; i++) {
+		
 		if (oldpids[i] == pid) {
+			ha_notice("====%s: delete pid=%d\n", __func__, oldpids[i]);
 			oldpids[i] = oldpids[nb_oldpids - 1];
 			oldpids[nb_oldpids - 1] = 0;
 			nb_oldpids--;
-			return 1;
+			ret = 1;
 		}
 	}
-	return 0;
+	ha_notice("====%s: master: final nb_oldpids=%d\n", __func__, nb_oldpids);
+	for (i = 0; i < nb_oldpids; i++) {
+		ha_notice("====%s: keep pid=%d\n", __func__, oldpids[i]);
+		
+	}
+	
+	return ret;
 }
 
 
@@ -1816,6 +1824,7 @@ static void init_args(int argc, char **argv)
 					oldpids_sig = SIGTERM; /* terminate immediately */
 				while (argc > 1 && argv[1][0] != '-') {
 					char * endptr = NULL;
+					ha_notice(">>> %s: init nb_oldpids=%d\n", __func__, nb_oldpids);
 					oldpids = realloc(oldpids, (nb_oldpids + 1) * sizeof(int));
 					if (!oldpids) {
 						ha_alert("Cannot allocate old pid : out of memory.\n");
@@ -1840,6 +1849,13 @@ static void init_args(int argc, char **argv)
 					if (oldpids[nb_oldpids] <= 0)
 						usage(progname);
 					nb_oldpids++;
+					ha_notice(">>> %s: start with nb_oldpids=%d\n", __func__, nb_oldpids);
+					for (int p = 0; p < nb_oldpids; p++) {
+						
+						ha_notice(">>>%s: got oldpid=%d\n", __func__, oldpids[p]);
+						
+					}
+					
 				}
 			}
 			else if (flag[0] == '-' && flag[1] == 0) { /* "--" */
@@ -3992,7 +4008,14 @@ int main(int argc, char **argv)
 		}
 	}
 
+	ha_notice("====%s: worker: final nb_oldpids=%d\n", __func__, nb_oldpids);
+	for (int x = 0; x < nb_oldpids; x++) {
+		ha_notice("====%s: keep pid=%d\n", __func__, oldpids[x]);
+		
 	}
+	
+	
+	
 
 	/* TODO put all this in tell_old_pids to reduce num signals to send and to optim 
 		ha_notice(">>> WORKER: can check and terminate max reloads\n");

@@ -486,6 +486,12 @@ restart_wait:
 		exit(EXIT_SUCCESS);
 	}
 
+	struct mworker_proc *proc;
+	ha_notice(">>> %s: final proc list\n", __func__);
+	list_for_each_entry(proc, &proc_list, list) {
+		ha_notice(">>> %s: pid:%d, opts=0x%08x, child->ipc_fd[0]=%d, child->ipc_fd[1]=%d, reloads=%d, sigterm=%d\n", __func__, proc->pid, proc->options, proc->ipc_fd[0], proc->ipc_fd[1], proc->reloads, proc->sigterm_sent);
+	}
+
 }
 
 /* ----- IPC FD (sockpair) related ----- */
