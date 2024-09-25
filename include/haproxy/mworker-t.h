@@ -49,6 +49,7 @@ struct mworker_proc {
 	struct list list;
 	int uid;
 	int gid;
+	int sigterm_sent;
 };
 
 #endif /* _HAPROXY_MWORKER_T_H_ */

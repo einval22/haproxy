@@ -239,7 +239,7 @@ char *progname;
  */
 #define MAX_START_RETRIES	200
 static int *oldpids = NULL;
-static int oldpids_sig; /* use USR1 or TERM */
+int oldpids_sig; /* use USR1 or TERM */
 
 /* Path to the unix socket we use to retrieve listener sockets from the old process */
 static const char *old_unixsocket;
@@ -686,7 +686,7 @@ int tell_old_pids(int sig)
 	int ret = 0;
 	for (p = 0; p < nb_oldpids; p++) {
 		if (kill(oldpids[p], sig) == 0) {
-			ha_warning("%s: send sig %d to %d\n", __func__, sig, oldpids[p]);
+			ha_notice("====%s: send sig %d to %d\n", __func__, sig, oldpids[p]);
 			ret++;
 		}
 	}
@@ -2250,7 +2250,7 @@ static void bind_listeners()
 	 * That's at most 1 second. We only send a signal to old pids
 	 * if we cannot grab at least one port.
 	 */
-	ha_warning("%s: try to bind new worker, nb_oldpids=%d\n", __func__, nb_oldpids);
+	ha_warning("%s: try to bind, nb_oldpids=%d\n", __func__, nb_oldpids);
 	retry = MAX_START_RETRIES; // 200
 	err = ERR_NONE;
 	while (retry >= 0) {
@@ -3046,7 +3046,6 @@ static void run_master_in_wait_mode(int argc, char **argv)
 static void read_cfg_in_discovery_mode(int argc, char **argv)
 {
 	struct cfgfile *cfg, *cfg_tmp;
-	int err;
 
 	usermsgs_clr("config");
 
@@ -3802,6 +3801,7 @@ int main(int argc, char **argv)
 	}
 
 	ha_free(&global.chroot);
+	/* change uid/gid, set caps */
 	set_identity(argv[0]);
 
 	/* set_identity() above might have dropped LSTCHK_NETADM or/and
@@ -3951,7 +3951,9 @@ int main(int argc, char **argv)
 
 	if (global.mode & MODE_WORKER) {
 		// TODO: error path
-		/* send PROC_O_READY to remove PROC_O_INIT */
+		/* send PROC_O_READY to remove PROC_O_INIT
+		 * up to receiving this status master will terminate the paused old worker and workers with max reloads exceeded
+		 */
 		int sock_pair[2];
 		char *msg = NULL;
 
@@ -3982,11 +3984,13 @@ int main(int argc, char **argv)
 		/* now close "connnection" sockpair with master */
 		close(sock_pair[1]);
 		ha_free(&msg);
+	} else {
+		/* standalone mode: finish or terminate the paused old worker */
+		if (nb_oldpids) {
+			nb_oldpids = tell_old_pids(oldpids_sig);
+
+		}
 	}
-	
-	/* finish or terminate the paused old worker */
-	if (nb_oldpids) {
-		nb_oldpids = tell_old_pids(oldpids_sig);
 
 	}
 

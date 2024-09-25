@@ -46,7 +46,7 @@
 #endif
 
 static int exitcode = -1;
-static int max_reloads = -1; /* number max of reloads a worker can have until they are killed */
+int max_reloads = -1; /* number max of reloads a worker can have until they are killed */
 struct mworker_proc *proc_self = NULL; /* process structure of current process */
 struct list mworker_cli_conf = LIST_HEAD_INIT(mworker_cli_conf); /* master CLI configuration (-S flag) */
 
@@ -932,7 +932,8 @@ void mworker_create_master_cli(void)
 }
 
 static struct cfg_kw_list mworker_kws = {{ }, {
-	{ CFG_GLOBAL, "mworker-max-reloads", mworker_parse_global_max_reloads },
+
+	{ CFG_GLOBAL, "mworker-max-reloads", mworker_parse_global_max_reloads, KWF_DISCOVERY },
 	{ 0, NULL, NULL },
 }};
 

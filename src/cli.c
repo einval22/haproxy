@@ -2479,22 +2479,41 @@ static int _send_status(char **args, char *payload, struct appctx *appctx, void 
 	struct mworker_proc *proc;
 	int pid = atoi(args[2]);
 
+	/* 1. update status of the new worker and 2. stop all workers with max reloads */
 	list_for_each_entry(proc, &proc_list, list) {
-		ha_notice(">>> %s: proc->pid=%d, opts=0x%08x, proc->ipc_fd_0=%d, proc->ipc_fd_1=%d\n", __func__, proc->pid, proc->options, proc->ipc_fd[0], proc->ipc_fd[1]);
-		/* update status of the new worker */
+		ha_notice(">>> %s: before: proc->pid=%d, opts=0x%08x, proc->ipc_fd_0=%d, proc->ipc_fd_1=%d\n", __func__, proc->pid, proc->options, proc->ipc_fd[0], proc->ipc_fd[1]);
+		/*  */
 		if (proc->pid == pid) {
+			/* new worker proc status after this just PROC_O_TYPE_WORKER */
 			proc->options &= ~PROC_O_INIT;
-			break;
-		}	
-	}
-	
+			ha_notice(">>> %s: status: updated proc->pid=%d, opts=0x%08x\n", __func__, proc->pid, proc->options);
+		}
+		ha_notice(">>>%s: max_reloads=%d\n", __func__, max_reloads);
+		if (max_reloads != -1) {
+			if ((proc->options & PROC_O_TYPE_WORKER) && (proc->options & PROC_O_LEAVING) && (proc->reloads > max_reloads) && (proc->pid > 0)) {
+				ha_notice("====%s: max_reloads: found worker: pid:%d, opts=0x%08x, reloads=%d, max=%d\n", __func__, proc->pid, proc->options, proc->reloads, max_reloads);
+				(proc->sigterm_sent)++;
+				kill(proc->pid, SIGTERM);
+				ha_notice("====%s: max_reloads: send TERM to %d\n", __func__, proc->pid);
+			}
 
-	ha_notice(">>> %s: updated proc->pid=%d, opts=0x%08x\n", __func__, proc->pid, proc->options);
+		}
+	}
+	/* stop previous worker process if it wasn't signaled during max reloads check */
+	list_for_each_entry(proc, &proc_list, list) {
+		ha_notice(">>> %s: after: proc->pid=%d, opts=0x%08x, proc->ipc_fd_0=%d, proc->ipc_fd_1=%d, reloads=%d, sigterm_sent=%d\n", __func__, proc->pid, proc->options, proc->ipc_fd[0], proc->ipc_fd[1], proc->reloads, proc->sigterm_sent);
+		if ((proc->options & PROC_O_TYPE_WORKER) && (proc->options & PROC_O_LEAVING) && (proc->reloads >= 1) && (proc->sigterm_sent == 0)) {
+			kill(proc->pid, oldpids_sig);
+			ha_notice("====%s: oldpid: send TERM to %d\n", __func__, proc->pid);
+		}
+	}
+
 	setenv("HAPROXY_LOAD_SUCCESS", "1", 1); // parsed in cli_io_handler_show_loadstatus
 
 	return 1;
 }
 
+/*
 static int _kill_max_reloads(char **args, char *payload, struct appctx *appctx, void *private)
 {
 
@@ -2517,12 +2536,13 @@ static int _kill_max_reloads(char **args, char *payload, struct appctx *appctx, 
 			break;
 		} 
 	}
-	*/
+
 	mworker_kill_max_reloads(SIGTERM, current_worker_pid);
 
 	return 1;
 
 }
+*/
 
 void pcli_write_prompt(struct stream *s)
 {
@@ -3664,7 +3684,7 @@ static struct cli_kw_list cli_kws = {{ },{
 	{ { "user", NULL },                      "user                                    : lower the level of the current CLI session to user",      cli_parse_set_lvl, NULL, NULL, NULL, ACCESS_MASTER},
 	{ { "wait", NULL },                      "wait {-h|<delay_ms>} cond [args...]     : wait the specified delay or condition (-h to see list)",  cli_parse_wait, cli_io_handler_wait, cli_release_wait, NULL },
 	{ { "_send_status", NULL },              NULL,  											      _send_status, NULL, NULL, NULL, ACCESS_MASTER_ONLY },
-	{ { "_kill_max_reloads", NULL },         NULL,  											      _kill_max_reloads, NULL, NULL, NULL, ACCESS_MASTER_ONLY },
+	//{ { "_kill_max_reloads", NULL },         NULL,  											      _kill_max_reloads, NULL, NULL, NULL, ACCESS_MASTER_ONLY },
 	{{},}
 }};
 
