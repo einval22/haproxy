@@ -46,7 +46,7 @@
 #endif
 
 static int exitcode = -1;
-int max_reloads = -1; /* number max of reloads a worker can have until they are killed */
+int max_reloads = INT_MAX; /* number max of reloads a worker can have until they are killed */
 struct mworker_proc *proc_self = NULL; /* process structure of current process */
 struct list mworker_cli_conf = LIST_HEAD_INIT(mworker_cli_conf); /* master CLI configuration (-S flag) */
 
@@ -464,7 +464,10 @@ restart_wait:
 				ha_notice(">>> %s: child pid=%d, opts=0x%08x, EXITED; will close IPC child->ipc_fd[0]=%d\n", __func__, exitpid, child->options, child->ipc_fd[0]);
 				fd_delete(child->ipc_fd[0]);
 				if (child->options & PROC_O_TYPE_WORKER) {
-					ha_warning("Former worker (%d) exited with code %d (%s)\n", exitpid, status, (status >= 128) ? strsignal(status - 128) : "Exit");
+					if (child->reloads > max_reloads)
+						ha_warning("Former worker (%d) exited with code %d (%s), max_reloads (%d) was exceeded\n", exitpid, status, (status >= 128) ? strsignal(status - 128) : "Exit", max_reloads);
+					else
+						ha_warning("Former worker (%d) exited with code %d (%s)\n", exitpid, status, (status >= 128) ? strsignal(status - 128) : "Exit");
 					delete_oldpid(exitpid);
 				} else if (child->options & PROC_O_TYPE_PROG) {
 					ha_warning("Former program '%s' (%d) exited with code %d (%s)\n", child->id, exitpid, status, (status >= 128) ? strsignal(status - 128) : "Exit");

@@ -34,7 +34,8 @@
 #define	MODE_VERBOSE	0x10
 #define	MODE_STARTING	0x20
 #define	MODE_FOREGROUND	0x40
-#define	MODE_MWORKER	0x80    /* Master Worker */
+#define	MODE_MWORKER	0x80    /* Master */
+#define MODE_MASTER_WORKER 0x100
 /* (1<<8) unused */
 #define	MODE_ZERO_WARNING       0x200    /* warnings cause a failure */
 #define	MODE_DIAG	0x400   /* extra warnings */
@@ -45,7 +46,7 @@
 #define	MODE_DUMP_CFG   0x8000  /* dump the configuration file */
 #define	MODE_DUMP_NB_L  0x10000 /* dump line numbers when the configuration file is dump */
 #define MODE_DISCOVERY  0x20000   /*  parse only global section with KW marked with KW_DISCOVERY to discover mode */
-#define MODE_WORKER	0x40000
+#define MODE_WORKER	0x40000 /* Worker */
 
 /* list of last checks to perform, depending on config options */
 #define LSTCHK_SYSADM	0x00000001	/* check that we have CAP_SYS_ADMIN */

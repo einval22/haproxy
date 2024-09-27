@@ -1556,7 +1556,7 @@ static void init_early(int argc, char **argv)
 
 	/* if we were in mworker mode, we should restart in mworker mode */
 	if (getenv("HAPROXY_MWORKER_REEXEC") != NULL)
-		global.mode |= MODE_MWORKER;
+		global.mode |= (MODE_MWORKER | MODE_MASTER_WORKER);
 
 	/* initialize date, time, and pid */
 	tzset();
@@ -1775,7 +1775,7 @@ static void init_args(int argc, char **argv)
 			else if (*flag == 'D')
 				arg_mode |= MODE_DAEMON;
 			else if (*flag == 'W' && flag[1] == 's') {
-				arg_mode |= MODE_MWORKER | MODE_FOREGROUND;
+				arg_mode |= (MODE_MWORKER | MODE_MASTER_WORKER | MODE_FOREGROUND);
 #if defined(USE_SYSTEMD)
 				global.tune.options |= GTUNE_USE_SYSTEMD;
 #else
@@ -1784,7 +1784,7 @@ static void init_args(int argc, char **argv)
 #endif
 			}
 			else if (*flag == 'W')
-				arg_mode |= MODE_MWORKER;
+				arg_mode |= (MODE_MWORKER | MODE_MASTER_WORKER);
 			else if (*flag == 'q')
 				arg_mode |= MODE_QUIET;
 			else if (*flag == 'x') {
@@ -2346,7 +2346,7 @@ static void step_init_1()
 	hlua_init();
 
 	/* set modes given from cmdline */
-	global.mode |= (arg_mode & (MODE_DAEMON | MODE_MWORKER | MODE_FOREGROUND | MODE_VERBOSE
+	global.mode |= (arg_mode & (MODE_DAEMON | MODE_MWORKER | MODE_MASTER_WORKER |MODE_FOREGROUND | MODE_VERBOSE
 				    | MODE_QUIET | MODE_CHECK | MODE_DEBUG | MODE_ZERO_WARNING
 				    | MODE_DIAG | MODE_CHECK_CONDITION | MODE_DUMP_LIBS | MODE_DUMP_KWD
 				    | MODE_DUMP_CFG | MODE_DUMP_NB_L));
@@ -3728,7 +3728,7 @@ int main(int argc, char **argv)
 	 * enable master CLI at worker side (worker can send messages to master),
 	 * setenv("HAPROXY_MWORKER", "1", 1);
 	 */
-	if (global.mode & MODE_MWORKER)
+	if (global.mode & MODE_MASTER_WORKER)
 		prepare_master();
 
 	/* daemon fork */
@@ -3739,15 +3739,15 @@ int main(int argc, char **argv)
 		apply_daemon_mode();
 	
 	/* open pid file before the chroot */
-	if ((global.mode & MODE_DAEMON || global.mode & MODE_MWORKER) && global.pidfile != NULL)
+	if ((global.mode & MODE_DAEMON || global.mode & MODE_MASTER_WORKER) && global.pidfile != NULL)
 		handle_pidfile();
 
 	/* master-worker fork */
-	if (global.mode & MODE_MWORKER)
+	if (global.mode & MODE_MASTER_WORKER)
 		apply_master_worker_mode();
 
 	/* worker, daemon, foreground mode reads the rest of the config */
-	if (!master) {
+	if (!(global.mode & MODE_MWORKER)) {
 		ha_alert(">>>> mode =0x%08x, read the rest of conf\n", global.mode);
 		if (read_cfg(progname) < 0) {
 			list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
@@ -3767,12 +3767,15 @@ int main(int argc, char **argv)
 	step_init_2(argc, argv);
 	/* register signals and bind to ports */
 	step_init_3();
-	if (!master && old_unixsocket)
+	ha_notice("%s: MASTER=%d\n", __func__, master);
+	if (!(global.mode & MODE_MASTER_WORKER) && old_unixsocket) {
+		ha_notice("%s: try to get old_unixsocket\n", __func__);
 		get_listeners_fd();
+	}
 
 	bind_listeners();
 
-	if (!master && listeners == 0) {
+	if ((global.mode & MODE_MASTER_WORKER) && listeners == 0) {
 		ha_alert("[%s.main()] No enabled listener found (check for 'bind' directives) ! Exiting.\n", progname);
 		/* Note: we don't have to send anything to the old pids because we
 		 * never stopped them. */
@@ -3789,7 +3792,7 @@ int main(int argc, char **argv)
 
 	step_init_4();
 
-	if (master) {
+	if (global.mode & MODE_MWORKER) {
 		run_master();
 		/* never get there in master context */
 	}
