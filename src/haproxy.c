@@ -3768,7 +3768,7 @@ int main(int argc, char **argv)
 	/* register signals and bind to ports */
 	step_init_3();
 	ha_notice("%s: MASTER=%d\n", __func__, master);
-	if (!(global.mode & MODE_MASTER_WORKER) && old_unixsocket) {
+	if (!(global.mode & MODE_MWORKER) && old_unixsocket) {
 		ha_notice("%s: try to get old_unixsocket\n", __func__);
 		get_listeners_fd();
 	}
