@@ -67,6 +67,10 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		alertif_too_many_args(0, file, linenum, args, &err_code);
 		goto out;
 	}
+
+	if (global.mode & MODE_DISCOVERY)
+		goto discovery_kw;
+
 	else if (strcmp(args[0], "limited-quic") == 0) {
 		if (alertif_too_many_args(0, file, linenum, args, &err_code))
 			goto out;
@@ -940,6 +944,7 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 	}
 	else {
+discovery_kw:
 		struct cfg_kw_list *kwl;
 		const char *best;
 		int index;
@@ -950,6 +955,11 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 				if (kwl->kw[index].section != CFG_GLOBAL)
 					continue;
 				if (strcmp(kwl->kw[index].kw, args[0]) == 0) {
+
+					/* in MODE_DISCOVERY we read only the keywords, which contains the appropiate flag */
+					if ((global.mode & MODE_DISCOVERY) && ((kwl->kw[index].flags & KWF_DISCOVERY) == 0 ))
+						goto out;
+
 					if (check_kw_experimental(&kwl->kw[index], file, linenum, &errmsg)) {
 						ha_alert("%s\n", errmsg);
 						err_code |= ERR_ALERT | ERR_FATAL;
@@ -969,7 +979,9 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 				}
 			}
 		}
-		
+
+		if (global.mode & MODE_DISCOVERY)
+			goto out;
 		best = cfg_find_best_match(args[0], &cfg_keywords.list, CFG_GLOBAL, common_kw_list);
 		if (best)
 			ha_alert("parsing [%s:%d] : unknown keyword '%s' in '%s' section; did you mean '%s' maybe ?\n", file, linenum, args[0], cursection, best);
