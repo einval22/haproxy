@@ -899,17 +899,9 @@ static void mworker_loop()
 /*
  * Reexec the process in failure mode, instead of exiting
  */
-void reexec_on_failure()
+void on_new_child_failure()
 {
 	struct mworker_proc *child;
-
-	if (!atexit_flag)
-		return;
-
-	/* get the info of the children in the env */
-	if (mworker_env_to_proc_list() < 0) {
-		exit(EXIT_FAILURE);
-	}
 
 	/* increment the number of failed reloads */
 	list_for_each_entry(child, &proc_list, list) {
@@ -928,8 +920,6 @@ void reexec_on_failure()
 	if (global.tune.options & GTUNE_USE_SYSTEMD)
 		sd_notify(0, "READY=1\nSTATUS=Reload failed!\n");
 #endif
-
-	mworker_reexec(0);
 }
 
 /*
