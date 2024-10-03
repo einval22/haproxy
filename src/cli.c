@@ -2501,6 +2501,8 @@ static int _send_status(char **args, char *payload, struct appctx *appctx, void 
 			kill(proc->pid, oldpids_sig);
 		}
 	}
+	setenv("HAPROXY_LOAD_SUCCESS", "1", 1);
+	ha_notice("Loading success.\n");
 
 	return 1;
 }
