@@ -2102,9 +2102,6 @@ static void init(int argc, char **argv)
 			ha_alert("Cannot create worker master CLI socketpair.\n");
 			exit(EXIT_FAILURE);
 		}
-		if (mworker_cli_global_proxy_new_listener(tmproc) < 0)
-			exit(EXIT_FAILURE);
-
 		LIST_APPEND(&proc_list, &tmproc->list);
 	}
 
@@ -2153,6 +2150,7 @@ static void init(int argc, char **argv)
 		int worker_pid;
 		struct mworker_proc *child;
 		struct ring *tmp_startup_logs = NULL;
+		char *sock_name = NULL;
 
 		/* at this point the worker must have his own startup_logs buffer */
 		tmp_startup_logs = startup_logs_dup(startup_logs);
@@ -2173,35 +2171,55 @@ static void init(int argc, char **argv)
 			unsetenv("HAPROXY_MWORKER_REEXEC");
 			ha_random_jump96(1);
 
+			list_for_each_entry(child, &proc_list, list) {
+				if ((child->options & PROC_O_TYPE_WORKER) && (child->options & PROC_O_INIT)) {
+					close(child->ipc_fd[0]);
+					child->ipc_fd[0] = -1;
+					/* attach listener to GLOBAL proxy on child->ipc_fd[1] */
+					if (mworker_cli_global_proxy_new_listener(child) < 0)
+						exit(EXIT_FAILURE);
+
+					break;
+				}
+			}
 			break;
 		default:
 			/* in parent */
+			ha_notice("New worker (%d) forked\n", worker_pid);
 			master = 1;
 			atexit_flag = 1;
 			atexit(exit_on_failure);
 
-			ha_notice("New worker (%d) forked\n", worker_pid);
-			/* find the right mworker_proc */
-			list_for_each_entry(child, &proc_list, list) {
-				if (child->reloads == 0 && child->options & PROC_O_TYPE_WORKER && child->pid == -1) {
-						child->timestamp = date.tv_sec;
-						child->pid = worker_pid;
-						child->version = strdup(haproxy_version);
-						/* at this step the fd is bound for the worker, set it to -1 so
-						 * it could be close in case of errors in mworker_cleanup_proc() */
-						child->ipc_fd[1] = -1;
-
-						break;
-				}
-			}
 			/* in exec mode, there's always exactly one thread. Failure to
 			 * set these ones now will result in nbthread being detected
 			 * automatically.
 			 */
 			global.nbtgroups = 1;
 			global.nbthread = 1;
-			/* master CLI */
+			/* creates MASTER proxy and reload sockpair */
 			mworker_create_master_cli();
+
+			/* find the right mworker_proc */
+			list_for_each_entry(child, &proc_list, list) {
+				if ((child->options & PROC_O_TYPE_WORKER) && (child->options & PROC_O_INIT)) {
+					child->timestamp = date.tv_sec;
+					child->pid = worker_pid;
+					child->version = strdup(haproxy_version);
+
+					close(child->ipc_fd[1]);
+					child->ipc_fd[1] = -1;
+
+					/* attach listener to MASTER proxy on child->ipc_fd[0] */
+					memprintf(&sock_name, "sockpair@%d", child->ipc_fd[0]);
+					if (mworker_cli_master_proxy_new_listener(sock_name) == NULL) {
+						ha_free(&sock_name);
+						exit(EXIT_FAILURE);
+					}
+					ha_free(&sock_name);
+
+					break;
+				}
+			}
 		}
 	}
 
