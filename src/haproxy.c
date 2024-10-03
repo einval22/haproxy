@@ -787,7 +787,7 @@ static void mworker_reexec(int hardreload)
 			next_argv[next_argc++] = "-sf";
 
 		list_for_each_entry(child, &proc_list, list) {
-			if (!(child->options & PROC_O_LEAVING) && (child->options & PROC_O_TYPE_WORKER))
+			if ((child->options & PROC_O_LEAVING) && (child->options & PROC_O_TYPE_WORKER))
 				current_child = child;
 
 			if (!(child->options & (PROC_O_TYPE_WORKER|PROC_O_TYPE_PROG)) || child->pid <= -1)
