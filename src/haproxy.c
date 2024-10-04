@@ -3603,13 +3603,6 @@ int main(int argc, char **argv)
 				close(child->ipc_fd[0]);
 				child->ipc_fd[0] = -1;
 			}
-			if (child->options & PROC_O_TYPE_WORKER &&
-				child->reloads == 0 &&
-				child->pid == -1) {
-				/* keep this struct if this is our pid */
-				proc_self = child;
-				continue;
-			}
 			LIST_DELETE(&child->list);
 			mworker_free_child(child);
 			child = NULL;
