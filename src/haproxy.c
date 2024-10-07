@@ -2153,8 +2153,6 @@ static void apply_master_worker_mode()
 		/* in parent */
 		ha_notice("New worker (%d) forked\n", worker_pid);
 		master = 1;
-		atexit_flag = 1;
-		atexit(exit_on_failure);
 
 		/* in exec mode, there's always exactly one thread. Failure to
 		 * set these ones now will result in nbthread being detected
@@ -2992,6 +2990,26 @@ static void step_init_4(void)
 	}
 	/* We won't ever use this anymore */
 	ha_free(&global.pidfile);
+}
+
+static void run_master_in_recovery_mode(int argc, char **argv)
+{
+	global.nbtgroups = 1;
+	global.nbthread = 1;
+	master = 1;
+	atexit(exit_on_failure);
+	/* master CLI */
+	mworker_create_master_cli();
+	step_init_2(argc, argv);
+	step_init_3();
+	if (protocol_bind_all(1) != 0) {
+		ha_alert("Master failed to bind master CLI socket.\n");
+		exit(1);
+	}
+
+	step_init_4();
+	/* enter in master polling loop */
+	run_master();
 }
 
 /* parse conf in disovery mode and set modes from config */
