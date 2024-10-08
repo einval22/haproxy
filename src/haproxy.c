@@ -2910,6 +2910,7 @@ static void step_init_4(void)
 {
 	struct rlimit limit;
 
+	/*set quiet mode */
 	/* MODE_QUIET can inhibit alerts and warnings below this line */
 	if (getenv("HAPROXY_MWORKER_REEXEC") != NULL) {
 		/* either stdin/out/err are already closed or should stay as they are. */
