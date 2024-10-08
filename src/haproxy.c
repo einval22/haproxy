@@ -3731,6 +3731,14 @@ int main(int argc, char **argv)
 	/* Worker, daemon, foreground modes read the rest of the config */
 	if (!master) {
 		usermsgs_clr("config");
+
+		/* nbthread and *thread keywords parsers are sensible to global
+		 * section position, it should be placed as the first in
+		 * the configuration, if these keywords are inside. So, let's
+		 * reset non_global_section_parsed counter for the second
+		 * configuration reading
+		 */
+		non_global_section_parsed = 0;
 		if (read_cfg(progname) < 0) {
 			list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
 				ha_free(&cfg->content);
