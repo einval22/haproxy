@@ -2059,7 +2059,6 @@ static void run_master()
  */
 static void apply_daemon_mode()
 {
-	/* TODO: close stdin, stdout, err */
 	int ret;
 
 	ret = fork();
