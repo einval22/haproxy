@@ -2130,8 +2130,6 @@ static void apply_master_worker_mode()
 		/* in child */
 		global.mode &= ~MODE_MWORKER;
 		global.mode |= MODE_WORKER;
-		/* child must never use the atexit function */
-		atexit_flag = 0;
 		startup_logs_free(startup_logs);
 		startup_logs = tmp_startup_logs;
 		/* This one must not be exported, it's internal! */
