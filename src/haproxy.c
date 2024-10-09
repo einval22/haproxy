@@ -2093,7 +2093,7 @@ static void init(int argc, char **argv)
 			ha_alert("Cannot allocate process structures.\n");
 			exit(EXIT_FAILURE);
 		}
-		tmproc->options |= PROC_O_TYPE_WORKER; /* worker */
+		tmproc->options |= (PROC_O_TYPE_WORKER | PROC_O_INIT);                                                                                                                                                                                                                                                                                                                                    ; /* worker */
 
 		/* create a sockpair to copy it via fork(), thus it will be in
 		 * master and in worker processes
