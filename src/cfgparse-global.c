@@ -1418,6 +1418,8 @@ static int cfg_parse_global_env_opts(char **args, int section_type,
 				     struct proxy *curpx, const struct proxy *defpx,
 				     const char *file, int line, char **err)
 {
+	if (!(global.mode & MODE_DISCOVERY))
+		return 0;
 
 	if (strcmp(args[0], "setenv") == 0 || strcmp(args[0], "presetenv") == 0) {
 		if (too_many_args(2, args, err, NULL))
@@ -1577,10 +1579,10 @@ static struct cfg_kw_list cfg_kws = {ILH, {
 	{ CFG_GLOBAL, "tune.disable-zero-copy-forwarding", cfg_parse_global_tune_forward_opts },
 	{ CFG_GLOBAL, "tune.chksize", cfg_parse_global_unsupported_opts },
 	{ CFG_GLOBAL, "nbproc", cfg_parse_global_unsupported_opts },
-	{ CFG_GLOBAL, "setenv", cfg_parse_global_env_opts },
-	{ CFG_GLOBAL, "unsetenv", cfg_parse_global_env_opts },
-	{ CFG_GLOBAL, "resetenv", cfg_parse_global_env_opts },
-	{ CFG_GLOBAL, "presetenv", cfg_parse_global_env_opts },
+	{ CFG_GLOBAL, "setenv", cfg_parse_global_env_opts, KWF_DISCOVERY },
+	{ CFG_GLOBAL, "unsetenv", cfg_parse_global_env_opts, KWF_DISCOVERY },
+	{ CFG_GLOBAL, "resetenv", cfg_parse_global_env_opts, KWF_DISCOVERY },
+	{ CFG_GLOBAL, "presetenv", cfg_parse_global_env_opts, KWF_DISCOVERY },
 	{ 0, NULL, NULL },
 }};
 
