@@ -30,6 +30,8 @@ haproxy h1 -W -S -conf {
 
 } -start
 
+shell { sleep 0.1s }
+
 haproxy h1 -mcli {
     send "show proc"
     expect ~ ".*foo.*\n.*bar.*\n"

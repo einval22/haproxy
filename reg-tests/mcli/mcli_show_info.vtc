@@ -21,6 +21,8 @@ haproxy h1 -W -S -conf {
         server www1 ${s1_addr}:${s1_port}
 } -start
 
+shell { sleep 0.1s }
+
 haproxy h1 -mcli {
     send "@1 show info"
     expect ~ ".*\nProcess_num: 1\n.*"
