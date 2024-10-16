@@ -2171,7 +2171,7 @@ static void apply_master_worker_mode()
 		break;
 	default:
 		/* in parent */
-		ha_notice("New worker (%d) forked\n", worker_pid);
+		ha_notice("Initializing new worker (%d)\n", worker_pid);
 		master = 1;
 
 		/* in exec mode, there's always exactly one thread. Failure to
