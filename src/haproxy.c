@@ -3796,7 +3796,7 @@ int main(int argc, char **argv)
 		 * reset non_global_section_parsed counter for the second
 		 * configuration reading
 		 */
-		if (!(global.mode & MODE_MWORKER)) {
+		if (global.mode & MODE_MWORKER) {
 			if (clean_env() != 0) {
 				ha_alert("Worker failed to clean its env, exiting.\n");
 				exit(EXIT_FAILURE);
@@ -3806,7 +3806,7 @@ int main(int argc, char **argv)
 				ha_alert("Worker failed to restore its env, exiting.\n");
 				exit(EXIT_FAILURE);
 			}
-
+			setenv("HAPROXY_MWORKER", "1", 1);
 		}
 		non_global_section_parsed = 0;
 		if (read_cfg(progname) < 0) {
