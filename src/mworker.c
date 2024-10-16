@@ -387,7 +387,7 @@ restart_wait:
 			 * previous behaviour
 			 */
 			if ((proc_self->options & PROC_O_TYPE_MASTER) && (proc_self->reloads == 0))
-				exit(exitcode);
+				exit(status);
 		} else {
 			/* check if exited child is a current child */
 			if (!(child->options & PROC_O_LEAVING)) {
