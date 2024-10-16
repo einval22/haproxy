@@ -1418,8 +1418,6 @@ static int cfg_parse_global_env_opts(char **args, int section_type,
 				     struct proxy *curpx, const struct proxy *defpx,
 				     const char *file, int line, char **err)
 {
-	if (!(global.mode & MODE_DISCOVERY))
-		return 0;
 
 	if (strcmp(args[0], "setenv") == 0 || strcmp(args[0], "presetenv") == 0) {
 		if (too_many_args(2, args, err, NULL))

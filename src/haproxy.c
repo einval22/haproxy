@@ -3796,6 +3796,18 @@ int main(int argc, char **argv)
 		 * reset non_global_section_parsed counter for the second
 		 * configuration reading
 		 */
+		if (!(global.mode & MODE_MWORKER)) {
+			if (clean_env() != 0) {
+				ha_alert("Worker failed to clean its env, exiting.\n");
+				exit(EXIT_FAILURE);
+			}
+
+			if (restore_env() != 0) {
+				ha_alert("Worker failed to restore its env, exiting.\n");
+				exit(EXIT_FAILURE);
+			}
+
+		}
 		non_global_section_parsed = 0;
 		if (read_cfg(progname) < 0) {
 			list_for_each_entry_safe(cfg, cfg_tmp, &cfg_cfgfiles, list) {
