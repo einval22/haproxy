@@ -651,10 +651,6 @@ int listeners_setenv(struct proxy *frontend, const char *varname)
 				char addr[46];
 				char port[6];
 
-				/* separate listener by semicolons */
-				if (trash->data)
-					chunk_appendf(trash, ";");
-
 				if (l->rx.addr.ss_family == AF_UNIX ||
 				    l->rx.addr.ss_family == AF_CUST_ABNS ||
 				    l->rx.addr.ss_family == AF_CUST_ABNSZ) {
@@ -675,8 +671,6 @@ int listeners_setenv(struct proxy *frontend, const char *varname)
 					addr_to_str(&l->rx.addr, addr, sizeof(addr));
 					port_to_str(&l->rx.addr, port, sizeof(port));
 					chunk_appendf(trash, "ipv6@[%s]:%s", addr, port);
-				} else if (l->rx.addr.ss_family == AF_CUST_SOCKPAIR) {
-					chunk_appendf(trash, "sockpair@%d", ((struct sockaddr_in *)&l->rx.addr)->sin_addr.s_addr);
 				}
 			}
 		}
