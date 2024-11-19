@@ -917,8 +917,71 @@ existing variables, not empty ones.
 Some variables are defined by HAProxy, they can be used in the configuration
 file, or could be inherited by a program (See 3.7. Programs):
 
+These variables are listed in the matrix below, and they are sorted to 4
+categories:
+
+* usable: variable can be checked in the configuration within
+  conditional blocks or predicates, it enables or disables like this some
+  configuration fragments, see more details about it in 2.4. Conditional
+  blocks.
+
+* modifiable: variable can be redefined or unset in the configuration
+  via "setenv"/"unsetenv" keywords.
+
+* viewable: variable is shown in "show env" command output, see more
+  details about it in the management guide (9.3. Unix Socket commands).
+
+* exported: variable is exported to launch programs in a modified environment
+  (See 3.7. Programs).
+
+There also two subcategories "master" and "worker", in case, when process is
+launched in master-worker mode.
+
+* master: variable is set and accessible for the master process. So, it will be
+  dumped in "show env" output and it can be used in conditional blocks
+  or directives to enable some special settings for the master (see examples in
+  2.4. Conditional blocks).
+
+* worker: variable is set and accessible for the worker process. It
+  will be dumped in "@1 show env" and the same as in the master case, it can
+  condition some worker process parameters (see examples from 2.4. Conditional
+  blocks).
+
+In a standalone mode (without "-W" option or "master-worker" keyword) process
+manages the variables, as it would be a worker, expect HAPROXY_MWORKER and
+HAPROXY_MASTER_CLI, which are not set in this case.
+
+Some variables are marked as not usable and not modifiable:
+
+* HAPROXY_CFGFILES
+* HAPROXY_MWORKER
+* HAPROXY_CLI
+* HAPROXY_MASTER_CLI
+* HAPROXY_LOCALPEER
+
+Its values are undefined during configuration parsing, they are set later during
+the initialization. So, it's recommended not to use these variables within
+conditional blocks and not to define its values via "setenv" keyword in the
+global section.
+
+ variable                         usable            modifiable          viewable        exported
+                            master    worker    master    worker    master    worker   (program)
+--------------------------+---------+---------+---------+---------+---------+---------+---------+
+HAPROXY_STARTUP_VERSION        X         X                             X         X         X
+HAPROXY_BRANCH                 X         X                             X         X         X
+HAPROXY_CFGFILES                                                       X         X         X
+HAPROXY_MWORKER                                                        X         X         X
+HAPROXY_CLI                                                                      X
+HAPROXY_MASTER_CLI                                                     X
+HAPROXY_LOCALPEER                                                                X
+HAPROXY_HTTP_LOG_FMT                     X         X         X
+HAPROXY_HTTP_CLF_LOG_FMT                 X         X         X
+HAPROXY_HTTPS_LOG_FMT                    X         X         X
+HAPROXY_TCP_LOG_FMT                      X         X         X
+HAPROXY_TCP_CLF_LOG_FMT                  X         X         X
+
 * HAPROXY_LOCALPEER: defined at the startup of the process which contains the
-  name of the local peer. (See "-L" in the management guide.)
+  name of the local peer. (See "-L" in the management guide.).
 
 * HAPROXY_CFGFILES: list of the configuration files loaded by HAProxy,
   separated by semicolons. Can be useful in the case you specified a
@@ -948,8 +1011,8 @@ file, or could be inherited by a program (See 3.7. Programs):
 
 * HAPROXY_MWORKER: In master-worker mode, this variable is set to 1.
 
-* HAPROXY_CLI: configured listeners addresses of the stats socket for every
-  processes, separated by semicolons.
+* HAPROXY_CLI: configured listeners addresses of the stats socket of every
+  processe, these addresses are separated by semicolons.
 
 * HAPROXY_MASTER_CLI: In master-worker mode, listeners addresses of the master
   CLI, separated by semicolons.
@@ -985,9 +1048,6 @@ proxies.
 This way it is possible to emit information to help locate a rule in variables,
 logs, error statuses, health checks, header values, or even to use line numbers
 to name some config objects like servers for example.
-
-See also "external-check command" for other variables.
-
 
 2.4. Conditional blocks
 -----------------------
@@ -1070,6 +1130,8 @@ The list of currently supported predicates is the following:
 
 Example:
 
+   # variable set by HAProxy in worker process environment, its presence enables
+   # an additional listener
    .if defined(HAPROXY_MWORKER)
        listen mwcli_px
           bind :1111
@@ -11221,8 +11283,6 @@ external-check command <command>
 
     PATH                    The PATH environment variable used when executing
                             the command may be set using "external-check path".
-
-  See also "2.3. Environment variables" for other variables.
 
   If the command executed and exits with a zero status then the check is
   considered to have passed, otherwise the check is considered to have
