@@ -9032,6 +9032,18 @@ no log
                                                 # level and send in tcp
     log "${LOCAL_SYSLOG}:514" local0 notice   # send to local server
 
+ In haproxy configuration files coming from distribution packages we often can
+ see the following log settings in the global section:
+
+ Example :
+    log /dev/log    local0
+    log /dev/log    local1 notice
+
+ This means that all log messages with all severity levels will be sent to
+ /dev/log socket with facility local0 and only important events, emitted at
+ level "notice", will be sent with facility local1. So, the content of local1
+ log file will be a subset of local0.
+
 log-format <fmt>
   Specifies the custom log format string to use for traffic logs
 
