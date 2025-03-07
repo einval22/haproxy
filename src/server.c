@@ -3643,6 +3643,9 @@ static int _srv_parse_kw(struct server *srv, char **args, int *cur_arg,
 		goto out;
 	}
 
+	if (strcmp(args[*cur_arg], "namespace") == 0) {
+		global.last_checks |= LSTCHK_SYSADM;
+	}
 	err_code = kw->parse(args, cur_arg, curproxy, srv, &errmsg);
 	if (err_code) {
 		display_parser_err(NULL, 0, args, *cur_arg, err_code, &errmsg);
