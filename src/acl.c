@@ -881,7 +881,7 @@ struct acl_cond *parse_acl_cond(const char **args, struct list *known_acl,
 			int arg_end = arg + 1;
 			const char **args_new;
 
-			while (*args[arg_end] && strcmp(args[arg_end], "}") != 0)
+			while (args[arg_end] && (strcmp(args[arg_end], "}") != 0) && (arg_end < MAX_LINE_ARGS))
 				arg_end++;
 
 			if (!*args[arg_end]) {
