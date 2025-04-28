@@ -2064,6 +2064,18 @@ next_line:
 				goto next_line;
 			}
 
+			if (err & PARSE_ERR_EMTY_LINE) {
+				/* only check this *after* being sure the output is allocated */
+				ha_warning("parsing [%s:%d]: empty line '' is detected at position %ld. It's considered as the end of arguments list. All following words and this empty line will be ignored.\n",
+					 file, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
+			}
+
+			if (err & PARSE_ERR_EMTY_ENV_VAR) {
+				/* only check this *after* being sure the output is allocated */
+				ha_warning("parsing [%s:%d]: env variable at position %ld has an empty value, maybe it's not you want.\n",
+					 file, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
+			}
+
 			/* everything's OK */
 			break;
 		}

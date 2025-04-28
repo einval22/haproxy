@@ -6313,9 +6313,14 @@ uint32_t parse_line(char *in, char *out, size_t *outlen, char **args, int *nbarg
 		}
 		else if (isspace((unsigned char)*in) && !squote && !dquote) {
 			/* a non-escaped space is an argument separator */
+			char *tmp = in;
 			while (isspace((unsigned char)*in))
 				in++;
 			EMIT_CHAR(0);
+			if (!*args[arg]) {
+				err |= PARSE_ERR_EMTY_LINE;
+				*errptr = tmp;
+			}
 			arg++;
 			if (arg < argsmax)
 				args[arg] = out + outpos;
