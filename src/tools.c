@@ -6140,7 +6140,7 @@ int is_dir_present(const char *path_fmt, ...)
 			err |= PARSE_ERR_OVERLAP;		       \
 		if (outpos >= outmax)				       \
 			err |= PARSE_ERR_TOOLARGE;		       \
-		if (!err)					       \
+		if (!(err & PARSE_ERR_FATAL_MASK))					                        \
 			out[outpos] = __c;			       \
 		outpos++;					       \
 	} while (0)
@@ -6208,6 +6208,10 @@ uint32_t parse_line(char *in, char *out, size_t *outlen, char **args, int *nbarg
 		}
 		else if (*in == '"' && !squote && (opts & PARSE_OPT_DQUOTE)) {  /* double quote outside single quotes */
 			if (dquote) {
+				if (strncmp(quote, (in - 1), 1) == 0) {
+					err |= PARSE_ERR_EMTY_LINE;
+					*errptr = in;
+				}
 				dquote = 0;
 				quote = NULL;
 			}
@@ -6220,6 +6224,10 @@ uint32_t parse_line(char *in, char *out, size_t *outlen, char **args, int *nbarg
 		}
 		else if (*in == '\'' && !dquote && (opts & PARSE_OPT_SQUOTE)) { /* single quote outside double quotes */
 			if (squote) {
+				if (strncmp(quote, (in - 1), 1) == 0) {
+					err |= PARSE_ERR_EMTY_LINE;
+					*errptr = in;
+				}
 				squote = 0;
 				quote = NULL;
 			}
@@ -6334,8 +6342,10 @@ uint32_t parse_line(char *in, char *out, size_t *outlen, char **args, int *nbarg
 			char *var_name;
 			char save_char;
 			const char *value;
+			char *tmp;
 
 			in++;
+			tmp = in;
 
 			if (*in == '{')
 				brace = in++;
@@ -6416,6 +6426,12 @@ uint32_t parse_line(char *in, char *out, size_t *outlen, char **args, int *nbarg
 			}
 
 			if (value) {
+				
+				if (*value == '\0') {
+					err |= PARSE_ERR_EMTY_ENV_VAR;
+					*errptr = tmp;
+				}
+					
 				while (*value) {
 					/* expand as individual parameters on a space character */
 					if (word_expand && isspace((unsigned char)*value)) {

@@ -2064,16 +2064,22 @@ next_line:
 				goto next_line;
 			}
 
-			if (err & PARSE_ERR_EMTY_LINE) {
-				/* only check this *after* being sure the output is allocated */
-				ha_warning("parsing [%s:%d]: empty line '' is detected at position %ld. It's considered as the end of arguments list. All following words and this empty line will be ignored.\n",
-					 file, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
+			if (err & PARSE_ERR_EMTY_ENV_VAR) {
+				if ((strcmp(args[0], "setenv") == 0) || (strcmp(args[0], "presetenv") == 0) || !(global.mode & MODE_DISCOVERY)) {
+					size_t newpos = sanitize_for_printing(line, errptr - line, 80);
+					ha_warning("parsing [%s:%d]: env variable at position %d has an empty value. Maybe it's not what you want:\n"
+						   "  %s\n  %*s\n", file, linenum, (int)(errptr-thisline+1), line, (int)(newpos), "^");
+				}
 			}
 
-			if (err & PARSE_ERR_EMTY_ENV_VAR) {
-				/* only check this *after* being sure the output is allocated */
-				ha_warning("parsing [%s:%d]: env variable at position %ld has an empty value, maybe it's not you want.\n",
-					 file, linenum, (int)(errptr-thisline+1), line, (int)(newpos+1), "^");
+			if (err & PARSE_ERR_EMTY_LINE) {
+				if ((strcmp(args[0], "setenv") == 0) || (strcmp(args[0], "presetenv") == 0) || !(global.mode & MODE_DISCOVERY)) {
+					size_t newpos = sanitize_for_printing(line, errptr - line, 80);
+					ha_warning("parsing [%s:%d]: empty line '' is detected at position %d. "
+						   "Empty line is considered as the end of arguments list. "
+						   "All following words and this empty line will be ignored.\n"
+						   "  %s\n  %*s\n", file, linenum, (int)(errptr-thisline+1), line, (int)(newpos), "^");
+				}
 			}
 
 			/* everything's OK */
