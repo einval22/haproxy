@@ -6325,10 +6325,12 @@ uint32_t parse_line(char *in, char *out, size_t *outlen, char **args, int *nbarg
 			while (isspace((unsigned char)*in))
 				in++;
 			EMIT_CHAR(0);
+			/*
 			if (!*args[arg]) {
 				err |= PARSE_ERR_EMTY_LINE;
 				*errptr = tmp;
 			}
+			*/
 			arg++;
 			if (arg < argsmax)
 				args[arg] = out + outpos;
