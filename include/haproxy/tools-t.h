@@ -74,6 +74,7 @@
 #define PARSE_OPT_WORD_EXPAND   0x00000040      // '[*]' suffix to expand an environment variable as several individual arguments
 
 /* return error flags from parse_line() */
+#define PARSE_ERR_FATAL_MASK    0x000000ff      // mask to recognize fatal errors, that stops splitting line on arg tokens
 #define PARSE_ERR_TOOLARGE      0x00000001      // result is too large for initial outlen
 #define PARSE_ERR_TOOMANY       0x00000002      // more words than initial nbargs
 #define PARSE_ERR_QUOTE         0x00000004      // unmatched quote (offending one at errptr)
@@ -82,6 +83,8 @@
 #define PARSE_ERR_VARNAME       0x00000020      // invalid variable name (at errptr)
 #define PARSE_ERR_OVERLAP       0x00000040      // output overlaps with input, need to allocate
 #define PARSE_ERR_WRONG_EXPAND  0x00000080      // unparsable word expansion sequence
+#define PARSE_ERR_EMTY_LINE     0x00000100      // empty line '' is detected within a given argument
+#define PARSE_ERR_EMTY_ENV_VAR  0x00000200      // empty env var is detected within a given argument
 
 /* special return values for the time parser (parse_time_err()) */
 #define PARSE_TIME_UNDER ((char *)1)
