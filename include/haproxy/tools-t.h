@@ -82,6 +82,7 @@
 #define PARSE_ERR_VARNAME       0x00000020      // invalid variable name (at errptr)
 #define PARSE_ERR_OVERLAP       0x00000040      // output overlaps with input, need to allocate
 #define PARSE_ERR_WRONG_EXPAND  0x00000080      // unparsable word expansion sequence
+#define PARSE_ERR_EMPTY_ARG     0x00000100      // empty string '' is detected within a given argument
 
 /* special return values for the time parser (parse_time_err()) */
 #define PARSE_TIME_UNDER ((char *)1)

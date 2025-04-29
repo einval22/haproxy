@@ -2064,6 +2064,16 @@ next_line:
 				goto next_line;
 			}
 
+			if (err & PARSE_ERR_EMPTY_ARG) {
+				if (!(global.mode & MODE_DISCOVERY)) {
+					size_t newpos = sanitize_for_printing(line, errptr - line, 80);
+					ha_warning("parsing [%s:%d]: empty argument '' is detected at position %d. "
+						   "Empty argument is considered as the end of arguments list. "
+						   "All following words and this one will be ignored.\n"
+						   "  %s\n  %*s\n", file, linenum, (int)(errptr-thisline), line, (int)(newpos)-1, "^");
+				}
+			}
+
 			/* everything's OK */
 			break;
 		}

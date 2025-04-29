@@ -20242,6 +20242,24 @@ conversion operators may be applied to the sample, and they will be specified
 as a comma-delimited list of keywords just after the first keyword. The values
 are of the type supported by the criterion, and are separated by spaces.
 
+Values can't contain an empty string ('', ""), like in the examples below,
+because internally an empty string is represented by an empty argument and
+such argument is used to mark the end of the arguments list.
+
+Example:
+
+   http-request deny if { path_dir '' }
+   acl bad_path path_dir '%2E' '' '//'
+   acl empty_found req.fhdr(X-Some-App) -m str ''
+
+If an empty string is detected within the ACL condition (the first example),
+process will emit a warning and will be terminated with an error because the
+resulted parsed condition '{ path_dir' is not valid.
+
+If an empty string is detected in the values list (the second and the third
+examples) the warning will be emitted as well, the process will start, but
+ACLs will not work as expected.
+
 ACL names must be formed from upper and lower case letters, digits, '-' (dash),
 '_' (underscore) , '.' (dot) and ':' (colon). ACL names are case-sensitive,
 which means that "my_acl" and "My_Acl" are two different ACLs.
