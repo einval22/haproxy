@@ -6140,7 +6140,7 @@ int is_dir_present(const char *path_fmt, ...)
 			err |= PARSE_ERR_OVERLAP;		       \
 		if (outpos >= outmax)				       \
 			err |= PARSE_ERR_TOOLARGE;		       \
-		if (!err)					       \
+		if ((!err) || (err == PARSE_ERR_EMPTY_ARG))					               \
 			out[outpos] = __c;			       \
 		outpos++;					       \
 	} while (0)
@@ -6313,9 +6313,15 @@ uint32_t parse_line(char *in, char *out, size_t *outlen, char **args, int *nbarg
 		}
 		else if (isspace((unsigned char)*in) && !squote && !dquote) {
 			/* a non-escaped space is an argument separator */
+			char *tmp = in;
+
 			while (isspace((unsigned char)*in))
 				in++;
 			EMIT_CHAR(0);
+			if (args[arg] && (!*args[arg])) {
+				err |= PARSE_ERR_EMPTY_ARG;
+				*errptr = tmp;
+			}
 			arg++;
 			if (arg < argsmax)
 				args[arg] = out + outpos;
