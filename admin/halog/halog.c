@@ -898,6 +898,9 @@ int main(int argc, char **argv)
 	if (!filter && !filter2)
 		die("No action specified.\n");
 
+	if ((filter & FILT_COUNT_IP_COUNT) && (filter & FILT_COUNT_SRV_STATUS))
+		die("Please, set either '-srv', or '-ic' as the output filter, not both at the same time.\n");
+
 	if (filter & FILT_ACC_COUNT && !filter_acc_count)
 		filter_acc_count=1;
 
