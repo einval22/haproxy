@@ -56,7 +56,7 @@ int cpu_map_configured(void);
 /* Dump the CPU topology <topo> for up to cpu_topo_maxcpus CPUs for
  * debugging purposes. Offline CPUs are skipped.
  */
-void cpu_dump_topology(const struct ha_cpu_topo *topo, struct buffer *trash);
+void cpu_dump_topology(const struct ha_cpu_topo *topo, struct buffer *trash, int in_show_dev);
 
 /* re-order a CPU topology array by locality to help form groups. */
 void cpu_reorder_by_locality(struct ha_cpu_topo *topo, int entries);

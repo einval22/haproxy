@@ -218,7 +218,7 @@ int cpu_map_configured(void)
 /* Dump the CPU topology <topo> for up to cpu_topo_maxcpus CPUs for
  * debugging purposes. Offline CPUs are skipped.
  */
-void cpu_dump_topology(const struct ha_cpu_topo *topo, struct buffer *trash)
+void cpu_dump_topology(const struct ha_cpu_topo *topo, struct buffer *trash, int in_show_dev)
 {
 	int has_smt = 0;
 	int cpu, lvl;
@@ -231,34 +231,36 @@ void cpu_dump_topology(const struct ha_cpu_topo *topo, struct buffer *trash)
 		}
 	}
 
-	for (cpu = 0; cpu <= cpu_topo_lastcpu; cpu++) {
-		if (ha_cpu_topo[cpu].st & HA_CPU_F_OFFLINE)
-			continue;
-
-		chunk_appendf(trash, "[%s] cpu=%3d pk=%02d no=%02d cl=%03d(%03d)",
-		       (ha_cpu_topo[cpu].st & HA_CPU_F_EXCL_MASK) ? "----" : "keep",
-		       ha_cpu_topo[cpu].idx,
-		       ha_cpu_topo[cpu].pk_id,
-		       ha_cpu_topo[cpu].no_id,
-		       ha_cpu_topo[cpu].cl_gid,
-		       ha_cpu_topo[cpu].cl_lid);
-
-		/* list only relevant cache levels */
-		for (lvl = 4; lvl >= 0; lvl--) {
-			if (ha_cpu_topo[cpu].ca_id[lvl] < 0)
+	if (!in_show_dev) {
+		for (cpu = 0; cpu <= cpu_topo_lastcpu; cpu++) {
+			if (ha_cpu_topo[cpu].st & HA_CPU_F_OFFLINE)
 				continue;
-			chunk_appendf(trash, lvl < 3 ? " l%d=%02d" : " l%d=%03d", lvl, ha_cpu_topo[cpu].ca_id[lvl]);
-		}
 
-		chunk_appendf(trash, " ts=%03d capa=%d", ha_cpu_topo[cpu].ts_id, ha_cpu_topo[cpu].capa);
+			chunk_appendf(trash, "[%s] cpu=%3d pk=%02d no=%02d cl=%03d(%03d)",
+			       (ha_cpu_topo[cpu].st & HA_CPU_F_EXCL_MASK) ? "----" : "keep",
+			       ha_cpu_topo[cpu].idx,
+			       ha_cpu_topo[cpu].pk_id,
+			       ha_cpu_topo[cpu].no_id,
+			       ha_cpu_topo[cpu].cl_gid,
+			       ha_cpu_topo[cpu].cl_lid);
 
-		if (has_smt) {
-			if (ha_cpu_topo[cpu].th_cnt > 1)
-				chunk_appendf(trash, " smt=%d/%d", ha_cpu_topo[cpu].th_id, ha_cpu_topo[cpu].th_cnt);
-			else
-				chunk_appendf(trash, " smt=%d", ha_cpu_topo[cpu].th_cnt);
+			/* list only relevant cache levels */
+			for (lvl = 4; lvl >= 0; lvl--) {
+				if (ha_cpu_topo[cpu].ca_id[lvl] < 0)
+					continue;
+				chunk_appendf(trash, lvl < 3 ? " l%d=%02d" : " l%d=%03d", lvl, ha_cpu_topo[cpu].ca_id[lvl]);
+			}
+
+			chunk_appendf(trash, " ts=%03d capa=%d", ha_cpu_topo[cpu].ts_id, ha_cpu_topo[cpu].capa);
+
+			if (has_smt) {
+				if (ha_cpu_topo[cpu].th_cnt > 1)
+					chunk_appendf(trash, " smt=%d/%d", ha_cpu_topo[cpu].th_id, ha_cpu_topo[cpu].th_cnt);
+				else
+					chunk_appendf(trash, " smt=%d", ha_cpu_topo[cpu].th_cnt);
+			}
+			chunk_appendf(trash, "\n");
 		}
-		chunk_appendf(trash, "\n");
 	}
 
 	chunk_appendf(trash, "CPU clusters:\n");
