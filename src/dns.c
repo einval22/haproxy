@@ -16,6 +16,7 @@
 #include <string.h>
 #include <unistd.h>
 
+
 #include <sys/types.h>
 
 #include <haproxy/action.h>
@@ -65,12 +66,52 @@ static int dns_connect_nameserver(struct dns_nameserver *ns)
 			 ns->counters->pid, ns->id);
 		return -1;
 	}
-	if (connect(fd, (struct sockaddr*)&dgram->addr.to, get_addr_len(&dgram->addr.to)) == -1) {
-		send_log(NULL, LOG_WARNING,
-			 "DNS : section '%s': can't connect socket for nameserver '%s'.\n",
-			 ns->counters->id, ns->id);
-		close(fd);
-		return -1;
+
+	switch(proto->fam->sock_domain) {
+	case AF_INET:
+		struct sockaddr_in address = {
+			.sin_family = AF_INET,
+			.sin_port = 0,
+			.sin_addr = { .s_addr = INADDR_ANY }
+		};
+		if (bind(fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+			send_log(NULL, LOG_WARNING,
+				 "DNS : section '%s': can't bind socket for nameserver '%s' on 0.0.0.0:0.\n",
+				 ns->counters->pid, ns->id);
+			return -1;
+		}
+		break;
+
+	case AF_INET6:
+		struct sockaddr_in6 address6 = {
+			.sin6_family = AF_INET6,
+			.sin6_port = 0,
+			.sin6_addr = IN6ADDR_ANY_INIT,
+			.sin6_flowinfo = 0,
+			.sin6_scope_id = 0
+		};
+		if (bind(fd, (struct sockaddr *)&address6, sizeof(address6)) < 0) {
+			send_log(NULL, LOG_WARNING,
+				 "DNS : section '%s': can't bind socket for nameserver '%s' on :::0.\n",
+				 ns->counters->pid, ns->id);
+			return -1;
+		}
+		break;
+
+	case AF_UNIX:
+		/* if IPC is used via local domain sockets, we don't expect that
+		 * the path to DNS server socket can change dynamically.
+		 */
+		if (connect(fd, (struct sockaddr*)&dgram->addr.to, get_addr_len(&dgram->addr.to)) == -1) {
+			send_log(NULL, LOG_WARNING,
+				 "DNS : section '%s': can't connect socket for nameserver '%s'.\n",
+				 ns->counters->id, ns->id);
+			close(fd);
+			return -1;
+		}
+		break;
+	default:
+		BUG_ON(proto->fam->sock_domain, "DNS: Unsupported address family.");
 	}
 
 	/* Make the socket non blocking */
@@ -106,7 +147,7 @@ int dns_send_nameserver(struct dns_nameserver *ns, void *buf, size_t len)
 			fd = dgram->t.sock.fd;
 		}
 
-		ret = send(fd, buf, len, 0);
+		ret = sendto(fd, buf, len, 0, (struct sockaddr*)&dgram->addr.to, get_addr_len(&dgram->addr.to));
 		if (ret < 0) {
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
 				struct ist myist;
