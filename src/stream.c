@@ -1704,6 +1704,7 @@ void stream_update_timings(struct task *t, uint64_t lat, uint64_t cpu)
 		}								\
 	}
 
+// ANALYZE    (s, res, pcli_wait_for_response,     ana_list, ana_back, AN_RES_WAIT_CLI);
 #define ANALYZE(strm, chn, fun, list, back, flag, ...)			\
 	{								\
 		if ((list) & (flag)) {					\
@@ -1825,6 +1826,7 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
 	}
 
  resync_stconns:
+	qfprintf(stdout, ">>>> %s:%d 1. in resync_stconns: scf_flags=0x%08x, scb_flags=0x%08x\n", __func__, getpid(), scf_flags, scb_flags);
 	if (!stream_alloc_work_buffer(s)) {
 		scf->flags &= ~SC_FL_DONT_WAKE;
 		scb->flags &= ~SC_FL_DONT_WAKE;
@@ -1977,6 +1979,7 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
 	 */
 
  resync_request:
+	qfprintf(stdout, ">>>> %s:%d 2. in resync_request: scf_flags=0x%08x, scb_flags=0x%08x\n", __func__, getpid(), scf_flags, scb_flags);
 	s->passes_reqana++;
 	/* Analyse request */
 	if (((req->flags & ~rqf_last) & CF_MASK_ANALYSER) ||
@@ -2083,6 +2086,7 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
 	req_ana_back = req->analysers;
 
  resync_response:
+	qfprintf(stdout, ">>>> %s:%d 3. in resync_response: scf_flags=0x%08x, scb_flags=0x%08x\n", __func__, getpid(), scf_flags, scb_flags);
 	s->passes_resana++;
 	/* Analyse response */
 
@@ -2120,10 +2124,12 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
 			 * analyser, and we may loop again if other analysers
 			 * are added in the middle.
 			 */
-
+			// #define ANALYZE(strm, chn, fun, list, back, flag, ...)	
 			ana_list = ana_back = res->analysers;
 			s->rules_bcount = 0;
+			qfprintf(stdout, "++++ %s:%d: init ana_list=0x%08x, ana_back==0x%08x\n", __func__, getpid(), ana_list, ana_back);
 			while (ana_list && max_loops--) {
+				
 				/* Warning! ensure that analysers are always placed in ascending order! */
 				ANALYZE    (s, res, flt_start_analyze,          ana_list, ana_back, AN_RES_FLT_START_FE);
 				ANALYZE    (s, res, flt_start_analyze,          ana_list, ana_back, AN_RES_FLT_START_BE);
@@ -2133,9 +2139,12 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
 				FLT_ANALYZE(s, res, http_process_res_common,    ana_list, ana_back, AN_RES_HTTP_PROCESS_BE, s->be);
 				ANALYZE    (s, res, flt_analyze_http_headers,   ana_list, ana_back, AN_RES_FLT_HTTP_HDRS);
 				ANALYZE    (s, res, http_response_forward_body, ana_list, ana_back, AN_RES_HTTP_XFER_BODY);
+				qfprintf(stdout, "--> %s:%d curr ana_list=0x%08x, ana_back==0x%08x\n", __func__, getpid(), ana_list, ana_back);
 				ANALYZE    (s, res, pcli_wait_for_response,     ana_list, ana_back, AN_RES_WAIT_CLI);
+				qfprintf(stdout, "----> updated %s:%d ana_list=0x%08x, ana_back==0x%08x\n", __func__, getpid(), ana_list, ana_back);
 				ANALYZE    (s, res, flt_xfer_data,              ana_list, ana_back, AN_RES_FLT_XFER_DATA);
 				ANALYZE    (s, res, flt_end_analyze,            ana_list, ana_back, AN_RES_FLT_END);
+				
 				break;
 			}
 		}

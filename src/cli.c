@@ -3425,6 +3425,7 @@ int pcli_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 	struct proxy *fe = strm_fe(s);
 	struct proxy *be = s->be;
 
+	qfprintf(stdout, ">>>%s:%d\n", __func__, getpid());
 	if ((s->scb->flags & SC_FL_ERROR) || (rep->flags & (CF_READ_TIMEOUT|CF_WRITE_TIMEOUT)) ||
 	    ((s->scf->flags & SC_FL_SHUT_DONE) && (rep->to_forward || co_data(rep)))) {
 		pcli_reply_and_close(s, "Can't connect to the target CLI!\n");
@@ -3446,12 +3447,16 @@ int pcli_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 	}
 
 	/* forward the data */
+	qfprintf(stdout, ">>%s:%d before forward s->scb->flags=0x%08x, curr data_size=%lu\n", __func__, getpid(), s->scb->flags, ci_data(rep));
 	if (ci_data(rep)) {
+		qfprintf(stdout, ">>%s:%d forward the data=%lu, flags=0x%08x, curr pos=%lu\n", __func__, getpid(), ci_data(rep), s->scb->flags, rep->output);
 		c_adv(rep, ci_data(rep));
+		qfprintf(stdout, ">>%s:%d forwarded data=%lu, flags=0x%08x, new pos=%lu\n", __func__, getpid(), ci_data(rep), s->scb->flags, rep->output);
 		return 0;
 	}
 
 	if (s->scb->flags & (SC_FL_ABRT_DONE|SC_FL_EOS)) {
+		qfprintf(stdout, ">>%s:%d s->scb->flags=0x%08x\n", __func__, getpid(), s->scb->flags);
 		uint8_t do_log = 0;
 
 		/* stream cleanup */
@@ -3461,6 +3466,7 @@ int pcli_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 		s->scb->flags |= SC_FL_NOLINGER | SC_FL_NOHALF;
 		sc_abort(s->scb);
 		sc_shutdown(s->scb);
+		qfprintf(stdout, ">>%s:%d sc_abort, sc_shutdown\n", __func__, getpid());
 
 		/*
 		 * starting from there this the same code as
@@ -3610,10 +3616,11 @@ int pcli_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 		channel_auto_read(&s->req);
 		channel_auto_close(&s->req);
 		channel_auto_read(&s->res);
-
+		qfprintf(stdout, "=================> %s:%d ret 1, flags=0x%08x, update list <===\n", __func__, getpid(), s->scb->flags);
 
 		return 1;
 	}
+	qfprintf(stdout, ">>%s:%d ret 0, flags:  s->scb->flags=0x%08x\n", __func__, getpid(), s->scb->flags);
 	return 0;
 }
 

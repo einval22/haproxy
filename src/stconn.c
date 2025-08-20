@@ -1903,6 +1903,7 @@ int sc_conn_process(struct stconn *sc)
 	 * pending data, then possibly wake the stream up based on the new
 	 * stream connector status.
 	 */
+	qfprintf(stdout, "=====>>>> %s:%d: call sc_notify\n", __func__, getpid());
 	sc_notify(sc);
 	stream_release_buffers(__sc_strm(sc));
 	return 0;
@@ -1946,23 +1947,29 @@ static void sc_applet_eos(struct stconn *sc)
 	if (sc->flags & (SC_FL_EOS|SC_FL_ABRT_DONE))
 		return;
 	sc->flags |= SC_FL_EOS;
+	qfprintf(stdout, "=====>>> %s:%d: set SC_FL_EOS on sc %p\n", __func__, getpid(), sc);
 	ic->flags |= CF_READ_EVENT;
 	sc_ep_report_read_activity(sc);
 	sc_report_term_evt(sc, (sc->flags & SC_FL_EOI ? strm_tevt_type_eos: strm_tevt_type_truncated_eos));
 
 	/* Note: on abort, we don't call the applet */
 
-	if (sc->state != SC_ST_EST)
+	if (sc->state != SC_ST_EST) {
+		qfprintf(stdout, "=====>>> %s:%d: set SC_FL_EOS on sc %p: abort dont call applet\n", __func__, getpid(), sc);
 		return;
+	}
 
 	if (sc->flags & SC_FL_SHUT_DONE) {
 		se_shutdown(sc->sedesc, SE_SHR_RESET|SE_SHW_NORMAL);
 		sc->state = SC_ST_DIS;
+		qfprintf(stdout, "=====>>> %s:%d: set SC_FL_EOS on sc %p: SC_FL_SHUT_DONE is set also conn_exp = TICK_ETERNITY\n", __func__, getpid(), sc);
 		if (sc->flags & SC_FL_ISBACK)
 			__sc_strm(sc)->conn_exp = TICK_ETERNITY;
 	}
-	else if (sc_cond_forward_shut(sc))
+	else if (sc_cond_forward_shut(sc)) {
+		qfprintf(stdout, "=====>>> %s:%d: set SC_FL_EOS on sc %p: call sc_app_shut_applet\n", __func__, getpid(), sc);
 		return sc_app_shut_applet(sc);
+	}
 }
 
 /*
@@ -2169,6 +2176,7 @@ int sc_applet_recv(struct stconn *sc)
 		/* we received a shutdown */
 		if (ic->flags & CF_AUTO_CLOSE)
 			sc_schedule_shutdown(sc_opposite(sc));
+		qfprintf(stdout, "=====>>> %s:%d: end_recv: SE_FL_EOS is set on streamconn %p\n", __func__, getpid(), sc);
 		sc_applet_eos(sc);
 		ret = 1;
 	}
@@ -2328,6 +2336,7 @@ int sc_applet_process(struct stconn *sc)
 	/* Report EOI on the channel if it was reached from the applet point of
 	 * view. */
 	if (sc_ep_test(sc, SE_FL_EOI) && !(sc->flags & SC_FL_EOI)) {
+		qfprintf(stdout, "=====>>>> %s:%d: SE_FL_EOI is on sc %p, set  SC_FL_EOI\n", __func__, getpid(), sc);
 		sc_ep_report_read_activity(sc);
 		sc->flags |= SC_FL_EOI;
 		ic->flags |= CF_READ_EVENT;
@@ -2337,6 +2346,7 @@ int sc_applet_process(struct stconn *sc)
 		sc->flags |= SC_FL_ERROR;
 
 	if (sc_ep_test(sc, SE_FL_EOS)) {
+		qfprintf(stdout, "=====>>>> %s:%d: SE_FL_EOS is on sc %p, set  SC_FL_EOS\n", __func__, getpid(), sc);
 		/* we received a shutdown */
 		sc_applet_eos(sc);
 	}
@@ -2357,6 +2367,7 @@ int sc_applet_process(struct stconn *sc)
 		applet_have_more_data(__sc_appctx(sc));
 
 	/* update the stream connector, channels, and possibly wake the stream up */
+	qfprintf(stdout, "=====>>>> %s:%d: call sc_notify\n", __func__, getpid());
 	sc_notify(sc);
 	stream_release_buffers(__sc_strm(sc));
 
